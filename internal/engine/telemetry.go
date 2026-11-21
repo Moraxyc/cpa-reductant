@@ -26,6 +26,7 @@ type RequestMeta struct {
 	Model          string
 	Stream         bool
 	HostCallbackID string
+	CaptureID      uint64
 }
 
 // LatencySummary summarizes execution duration in milliseconds.

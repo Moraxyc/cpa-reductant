@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/moraxyc/cpa-reductant/internal/config"
 )
@@ -248,5 +249,126 @@ func TestEngineTelemetryRestoreEventsAndKeyPathLock(t *testing.T) {
 	onlyErrors := eng.StatusWithOptions(10, "error")
 	if len(onlyErrors.RecentEvents) != 1 || onlyErrors.RecentEvents[0].Action != "error" {
 		t.Fatalf("expected action=error filter to return 1 event, got %+v", onlyErrors.RecentEvents)
+	}
+}
+
+func TestEngineDebugCaptureLifecycleAndTTL(t *testing.T) {
+	eng := New(&config.Config{
+		Words: []string{"SYNTHETIC-CAPTURE-ALPHA", "SYNTHETIC-CAPTURE-BETA"},
+	})
+	defer eng.Close()
+
+	if eng.BeginCapture() != 0 {
+		t.Fatalf("expected BeginCapture to return 0 when disabled")
+	}
+	if _, err := eng.MaskJSON("m1", []byte(`{"text":"SYNTHETIC-CAPTURE-ALPHA"}`)); err != nil {
+		t.Fatalf("MaskJSON while disabled: %v", err)
+	}
+	if snap := eng.DebugCaptureSnapshot(0, 0, "", ""); snap.Enabled || len(snap.Entries) != 0 {
+		t.Fatalf("expected empty disabled snapshot, got %+v", snap)
+	}
+
+	snap := eng.ConfigureDebugCapture(true, 5*time.Minute, 2, false)
+	if !snap.Enabled || snap.MaxEntries != 2 || snap.RemainingSeconds <= 0 {
+		t.Fatalf("unexpected enabled snapshot: %+v", snap)
+	}
+
+	// Capture #1: Mask + Restore.
+	cid1 := eng.BeginCapture()
+	if cid1 == 0 {
+		t.Fatalf("expected non-zero capture ID when enabled")
+	}
+	raw1 := []byte(`{"messages":[{"role":"user","content":"hello SYNTHETIC-CAPTURE-ALPHA"}]}`)
+	masked1, err := eng.MaskRequest(context.Background(), RequestMeta{
+		Protocol:  config.ProtocolClaude,
+		Model:     "claude-test",
+		CaptureID: cid1,
+	}, raw1)
+	if err != nil {
+		t.Fatalf("MaskRequest #1: %v", err)
+	}
+	restored1, n1 := eng.RestoreResponseWithMeta(RequestMeta{
+		Protocol:  config.ProtocolClaude,
+		Model:     "claude-test",
+		CaptureID: cid1,
+	}, "application/json", masked1)
+	if n1 != 1 || !strings.Contains(string(restored1), "SYNTHETIC-CAPTURE-ALPHA") {
+		t.Fatalf("expected restored response #1, n=%d out=%s", n1, restored1)
+	}
+
+	// Capture #2 & #3 with max_entries=2 should retain #2 and #3 (newest first).
+	for _, term := range []string{"SYNTHETIC-CAPTURE-BETA", "SYNTHETIC-CAPTURE-ALPHA"} {
+		if _, err := eng.MaskRequest(context.Background(), RequestMeta{
+			Protocol: config.ProtocolOpenAI,
+			Model:    "gpt-test",
+		}, []byte(`{"text":"`+term+`"}`)); err != nil {
+			t.Fatalf("MaskRequest: %v", err)
+		}
+	}
+
+	snap = eng.DebugCaptureSnapshot(0, 0, "", "")
+	if snap.EntriesCount != 2 || len(snap.Entries) != 2 {
+		t.Fatalf("expected 2 retained entries with max_entries=2, got count=%d len=%d", snap.EntriesCount, len(snap.Entries))
+	}
+	if snap.Entries[0].ID <= snap.Entries[1].ID {
+		t.Fatalf("expected newest-first order, got ids %d, %d", snap.Entries[0].ID, snap.Entries[1].ID)
+	}
+
+	// Check exact plaintext capture on #1 before eviction using fresh capture.
+	snap = eng.ConfigureDebugCapture(true, 5*time.Minute, 10, true)
+	if len(snap.Entries) != 0 {
+		t.Fatalf("expected clear=true to reset entries, got %d", len(snap.Entries))
+	}
+	cid := eng.BeginCapture()
+	masked, err := eng.MaskRequest(context.Background(), RequestMeta{
+		Protocol:  config.ProtocolClaude,
+		Model:     "claude-test",
+		CaptureID: cid,
+	}, raw1)
+	if err != nil {
+		t.Fatalf("MaskRequest: %v", err)
+	}
+	_, _ = eng.RestoreResponseWithMeta(RequestMeta{
+		Protocol:  config.ProtocolClaude,
+		Model:     "claude-test",
+		CaptureID: cid,
+	}, "application/json", masked)
+
+	snap = eng.DebugCaptureSnapshot(0, cid, "", "")
+	if len(snap.Entries) != 1 {
+		t.Fatalf("expected 1 entry for id=%d, got %d", cid, len(snap.Entries))
+	}
+	ev := snap.Entries[0]
+	if ev.RawRequest != string(raw1) || ev.MaskedRequest != string(masked) {
+		t.Fatalf("unexpected raw/masked bodies: %+v", ev)
+	}
+	if len(ev.Replacements) != 1 || ev.Replacements[0].Original != "SYNTHETIC-CAPTURE-ALPHA" || !strings.HasPrefix(ev.Replacements[0].Placeholder, "{{TERM_") {
+		t.Fatalf("unexpected replacements: %+v", ev.Replacements)
+	}
+	if ev.RestoredCount != 1 || len(ev.RestoredItems) != 1 || ev.RestoredItems[0].Original != "SYNTHETIC-CAPTURE-ALPHA" || ev.RestoredItems[0].Count != 1 {
+		t.Fatalf("unexpected restored items: %+v", ev.RestoredItems)
+	}
+
+	// TTL expiry disables new captures while preserving existing entries until cleared.
+	eng.ConfigureDebugCapture(true, 1*time.Millisecond, 0, false)
+	time.Sleep(10 * time.Millisecond)
+	snap = eng.DebugCaptureSnapshot(0, 0, "", "")
+	if snap.Enabled || len(snap.Entries) != 1 {
+		t.Fatalf("expected expired capture to auto-disable and keep entries, got %+v", snap)
+	}
+	if eng.BeginCapture() != 0 {
+		t.Fatalf("expected BeginCapture to return 0 after TTL expiry")
+	}
+
+	cleared := eng.ClearDebugCapture()
+	if len(cleared.Entries) != 0 || cleared.EntriesCount != 0 {
+		t.Fatalf("expected ClearDebugCapture to empty entries, got %+v", cleared)
+	}
+
+	// Truncation preserves valid UTF-8 boundaries.
+	big := append([]byte(strings.Repeat("a", MaxCaptureBodyBytes()-1)), []byte("中文结尾")...)
+	truncStr, total, truncated := truncateCaptureBytes(big, MaxCaptureBodyBytes())
+	if !truncated || total != len(big) || len(truncStr) > MaxCaptureBodyBytes() {
+		t.Fatalf("unexpected truncation result: len=%d total=%d truncated=%v", len(truncStr), total, truncated)
 	}
 }

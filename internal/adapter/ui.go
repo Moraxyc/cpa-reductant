@@ -32,6 +32,7 @@ type uiViewData struct {
 	BaseURL         string
 	JSONURL         string
 	PreviewURL      string
+	DebugCaptureURL string
 	ActionFilter    string
 	EventLimit      int
 	HealthLabel     string
@@ -195,7 +196,19 @@ tr:last-child td{border-bottom:none}
 .empty{padding:20px;text-align:center;color:var(--muted);font-size:13px}
 textarea{width:100%;min-height:76px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font:12px/1.5 var(--mono);resize:vertical}
 .preview-out{margin-top:10px;padding:10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-word;display:none}
-.err-box{margin-top:8px;padding:8px 10px;border-radius:6px;background:var(--red-bg);color:var(--red);font-size:12px}`
+.err-box{margin-top:8px;padding:8px 10px;border-radius:6px;background:var(--red-bg);color:var(--red);font-size:12px}
+.select{padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);font-size:12px}
+.cap-list{display:flex;flex-direction:column;gap:10px;margin-top:12px}
+.cap-item{border:1px solid var(--border);border-radius:8px;background:var(--surface-2);overflow:hidden}
+.cap-summary{padding:10px 12px;cursor:pointer;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;list-style:none}
+.cap-summary::-webkit-details-marker{display:none}
+.cap-body{padding:12px;border-top:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;gap:12px}
+.diff-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+.diff-pane{display:flex;flex-direction:column;gap:6px}
+.diff-title{font-size:12px;font-weight:600;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+.code-box{margin:0;padding:10px;border-radius:8px;background:var(--bg);border:1px solid var(--border);font:12px/1.45 var(--mono);white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto}
+.orig-val{color:var(--red);font-weight:600;word-break:break-all}
+.ph-val{color:var(--blue);word-break:break-all}`
 
 const dashboardHTML = `<!doctype html>
 <html lang="zh-CN">
@@ -472,6 +485,27 @@ const dashboardHTML = `<!doctype html>
   </div>
 
   <div class="card">
+    <h2>
+      <span>调试抓包 <span class="sub">临时内存开关（支持 TTL 自动关闭），对比原始请求、脱敏报文与响应还原</span></span>
+      <span class="actions">
+        <span id="cap-badge" class="badge badge-muted">未加载</span>
+        <select id="cap-ttl" class="select" title="抓包有效期">
+          <option value="60">1 分钟</option>
+          <option value="300" selected>5 分钟</option>
+          <option value="900">15 分钟</option>
+          <option value="1800">30 分钟</option>
+        </select>
+        <button id="cap-toggle-btn" class="btn" type="button" onclick="toggleCapture()">开启抓包</button>
+        <button class="btn" type="button" onclick="loadCapture()">刷新抓包</button>
+        <button class="btn" type="button" onclick="clearCapture()">清空记录</button>
+      </span>
+    </h2>
+    <div class="sub">curl 接口：<span class="mono">{{.DebugCaptureURL}}</span></div>
+    <div id="cap-err" class="err-box" style="display:none"></div>
+    <div id="cap-list" class="cap-list"><div class="empty">点击「刷新抓包」或「开启抓包」加载调试捕获</div></div>
+  </div>
+
+  <div class="card">
     <h2>脱敏预览 <span class="sub">只读测试，不计入统计或还原映射</span></h2>
     <textarea id="preview-input" placeholder="输入测试文本（例如：Authorization: Bearer sk-ant-api03-example1234567890, contact alice@example.com）"></textarea>
     <div class="actions" style="margin-top:8px">
@@ -482,6 +516,105 @@ const dashboardHTML = `<!doctype html>
   </div>
 </div>
 <script>
+var capState = { enabled: false, openIDs: {} };
+function escCap(v){
+  return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function prettyCap(s){
+  if(!s) return '';
+  try{ return JSON.stringify(JSON.parse(s), null, 2); }catch(_){ return s; }
+}
+function renderCaptureSnap(snap){
+  capState.enabled = !!snap.enabled;
+  var badge = document.getElementById('cap-badge');
+  var btn = document.getElementById('cap-toggle-btn');
+  if(snap.enabled){
+    badge.className = 'badge badge-amber';
+    badge.textContent = '抓包中 · 剩余 ' + (snap.remaining_seconds || 0) + 's';
+    btn.className = 'btn active';
+    btn.textContent = '停止抓包';
+  }else{
+    badge.className = 'badge badge-muted';
+    badge.textContent = '已关闭 · 缓存 ' + (snap.entries ? snap.entries.length : 0) + ' 条';
+    btn.className = 'btn';
+    btn.textContent = '开启抓包';
+  }
+  var list = document.getElementById('cap-list');
+  var entries = snap.entries || [];
+  if(!entries.length){
+    list.innerHTML = '<div class="empty">' + (snap.enabled ? '抓包已开启，等待新请求...' : '暂无抓包记录') + '</div>';
+    return;
+  }
+  list.innerHTML = entries.map(function(ev){
+    var openAttr = capState.openIDs[ev.id] ? ' open' : '';
+    var reps = ev.replacements || [];
+    var restored = ev.restored_items || [];
+    var repHtml = reps.length ? ('<table><thead><tr><th>原文</th><th>替换值 / 占位符</th><th>类型</th><th>方式</th><th>动作</th></tr></thead><tbody>' +
+      reps.map(function(r){
+        var orig = r.original ? '<span class="orig-val">' + escCap(r.original) + '</span>' : '<span class="sub">(未替换 · 仅告警)</span>';
+        return '<tr><td class="mono">' + orig + '</td><td class="mono ph-val">' + escCap(r.placeholder || '-') + '</td><td class="mono">' + escCap(r.kind) + '</td><td class="mono">' + escCap(r.by || '-') + '</td><td class="mono">' + escCap(r.action || 'mask') + '</td></tr>';
+      }).join('') + '</tbody></table>') : '<div class="sub">请求阶段无敏感替换</div>';
+    var resHtml = restored.length ? ('<table><thead><tr><th>占位符</th><th>还原原文</th><th>次数</th></tr></thead><tbody>' +
+      restored.map(function(r){
+        return '<tr><td class="mono ph-val">' + escCap(r.placeholder) + '</td><td class="mono orig-val">' + escCap(r.original || '-') + '</td><td class="mono">' + (r.count || 0) + '</td></tr>';
+      }).join('') + '</tbody></table>') : '';
+    var upText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + (ev.upstream_response_bytes || 0) + ' B]') : prettyCap(ev.upstream_response);
+    var reText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + (ev.restored_response_bytes || 0) + ' B]') : prettyCap(ev.restored_response);
+    return '<details class="cap-item" data-cap-id="' + ev.id + '"' + openAttr + '>' +
+      '<summary class="cap-summary">' +
+        '<span class="mono"><strong>#' + ev.id + '</strong> ' + escCap(ev.timestamp) + ' · ' + escCap(ev.protocol || '-') + (ev.model ? ' / ' + escCap(ev.model) : '') + (ev.stream ? ' [SSE]' : '') + '</span>' +
+        '<span class="actions"><span class="badge badge-blue">' + escCap(ev.action) + '</span><span class="sub mono">替换 ' + reps.length + ' · 还原 ' + (ev.restored_count || 0) + '</span></span>' +
+      '</summary>' +
+      '<div class="cap-body">' +
+        (ev.error ? '<div class="err-box">' + escCap(ev.error) + '</div>' : '') +
+        '<div><div class="diff-title"><span>请求替换明细 (' + reps.length + ')</span></div>' + repHtml + '</div>' +
+        (resHtml ? '<div><div class="diff-title"><span>响应还原明细 (' + (ev.restored_count || 0) + ')</span></div>' + resHtml + '</div>' : '') +
+        '<div class="diff-grid">' +
+          '<div class="diff-pane"><div class="diff-title"><span>原始请求 (Raw)</span><span class="mono">' + (ev.raw_request_bytes || 0) + ' B' + (ev.raw_request_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + escCap(prettyCap(ev.raw_request)) + '</pre></div>' +
+          '<div class="diff-pane"><div class="diff-title"><span>脱敏请求 (Masked → 上游)</span><span class="mono">' + (ev.masked_request_bytes || 0) + ' B' + (ev.masked_request_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + escCap(prettyCap(ev.masked_request)) + '</pre></div>' +
+        '</div>' +
+        '<div class="diff-grid">' +
+          '<div class="diff-pane"><div class="diff-title"><span>上游原始响应 (Upstream)</span><span class="mono">' + (ev.upstream_response_bytes || 0) + ' B' + (ev.upstream_response_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + escCap(upText) + '</pre></div>' +
+          '<div class="diff-pane"><div class="diff-title"><span>还原后响应 (Restored → 客户端)</span><span class="mono">' + (ev.restored_response_bytes || 0) + ' B' + (ev.restored_response_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + escCap(reText) + '</pre></div>' +
+        '</div>' +
+      '</div></details>';
+  }).join('');
+  Array.prototype.forEach.call(list.querySelectorAll('details[data-cap-id]'), function(el){
+    el.ontoggle = function(){ capState.openIDs[el.getAttribute('data-cap-id')] = el.open; };
+  });
+}
+async function callCapture(method, body){
+  var errEl = document.getElementById('cap-err');
+  errEl.style.display = 'none';
+  try{
+    var opts = {method: method, headers: {}};
+    if(body !== undefined){
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    var resp = await fetch('{{.DebugCaptureURL}}', opts);
+    var data = await resp.json();
+    if(!resp.ok){
+      errEl.style.display = 'block';
+      errEl.textContent = '错误: ' + (data.error || resp.status);
+      return;
+    }
+    renderCaptureSnap(data);
+  }catch(e){
+    errEl.style.display = 'block';
+    errEl.textContent = '请求失败: ' + e;
+  }
+}
+function loadCapture(){ return callCapture('GET'); }
+function toggleCapture(){
+  if(capState.enabled){ return callCapture('POST', {enabled: false}); }
+  var ttl = parseInt(document.getElementById('cap-ttl').value || '300', 10);
+  return callCapture('POST', {enabled: true, ttl_seconds: ttl});
+}
+function clearCapture(){
+  capState.openIDs = {};
+  return callCapture('DELETE');
+}
 async function runPreview(){
   var input=document.getElementById('preview-input').value;
   var out=document.getElementById('preview-out');
@@ -618,6 +751,27 @@ body.embedded .auth-wrap{margin-top:12px}
   </div>
 
   <div class="card">
+    <h2>
+      <span>调试抓包 <span class="sub">临时内存开关（支持 TTL 自动关闭），对比原始请求、脱敏报文与响应还原</span></span>
+      <span class="actions">
+        <span id="cap-badge" class="badge badge-muted">已关闭</span>
+        <select id="cap-ttl" class="select" title="抓包有效期">
+          <option value="60">1 分钟</option>
+          <option value="300" selected>5 分钟</option>
+          <option value="900">15 分钟</option>
+          <option value="1800">30 分钟</option>
+        </select>
+        <button id="cap-toggle-btn" class="btn" type="button" onclick="toggleCapture()">开启抓包</button>
+        <button class="btn" type="button" onclick="loadCapture()">刷新抓包</button>
+        <button class="btn" type="button" onclick="clearCapture()">清空记录</button>
+      </span>
+    </h2>
+    <div class="sub">支持 <span class="mono">curl</span> 调用：<span class="mono">/v0/management/cpa-reductant/debug/capture</span>（GET 查看 / POST 开关 / DELETE 清空）</div>
+    <div id="cap-err" class="err-box hidden"></div>
+    <div id="cap-list" class="cap-list"><div class="empty">抓包未开启</div></div>
+  </div>
+
+  <div class="card">
     <h2>脱敏预览 <span class="sub">只读测试，不计入统计或还原映射</span></h2>
     <textarea id="preview-input" placeholder="输入测试文本（例如：Authorization: Bearer sk-ant-api03-example1234567890, contact alice@example.com）"></textarea>
     <div class="actions" style="margin-top:8px">
@@ -640,6 +794,7 @@ body.embedded .auth-wrap{margin-top:12px}
   var KEY_STORAGE = 'cpa_reductant_mgmt_key';
   var STATUS_URL = '/v0/management/cpa-reductant/status';
   var PREVIEW_URL = '/v0/management/cpa-reductant/preview';
+  var DEBUG_CAPTURE_URL = '/v0/management/cpa-reductant/debug/capture';
   var FINDER_META = {rule:'内置规则',yours:'自定义规则',word:'词表',model:'本地模型',known:'关联匹配'};
   var ACTION_FILTERS = [['','全部'],['mask','脱敏'],['warn','告警'],['block','拦截'],['restore','还原'],['passthrough','放行'],['error','错误']];
 
@@ -647,7 +802,9 @@ body.embedded .auth-wrap{margin-top:12px}
     key: '',
     actionFilter: '',
     autoTimer: null,
-    lastStatus: null
+    lastStatus: null,
+    captureEnabled: false,
+    openCaptures: {}
   };
 
   function esc(v){
@@ -952,6 +1109,7 @@ body.embedded .auth-wrap{margin-top:12px}
       }
       showApp();
       renderStatus(data);
+      window.loadCapture();
     }catch(e){
       if(document.getElementById('app').classList.contains('hidden')){
         showAuth('请求失败: ' + e);
@@ -995,6 +1153,112 @@ body.embedded .auth-wrap{margin-top:12px}
   window.disconnectKey = function(){
     document.getElementById('secret-input').value = '';
     showAuth('');
+  };
+
+  function prettyText(s){
+    if(!s) return '';
+    try{ return JSON.stringify(JSON.parse(s), null, 2); }catch(_){ return s; }
+  }
+
+  function renderCapture(snap){
+    state.captureEnabled = !!(snap && snap.enabled);
+    var badge = document.getElementById('cap-badge');
+    var btn = document.getElementById('cap-toggle-btn');
+    var entries = (snap && snap.entries) || [];
+    if(state.captureEnabled){
+      badge.className = 'badge badge-amber';
+      badge.textContent = '抓包中 · 剩余 ' + (snap.remaining_seconds || 0) + 's';
+      btn.className = 'btn active';
+      btn.textContent = '停止抓包';
+    }else{
+      badge.className = 'badge badge-muted';
+      badge.textContent = '已关闭 · 缓存 ' + entries.length + ' 条';
+      btn.className = 'btn';
+      btn.textContent = '开启抓包';
+    }
+    var list = document.getElementById('cap-list');
+    if(!entries.length){
+      list.innerHTML = '<div class="empty">' + (state.captureEnabled ? '抓包已开启，等待新请求...' : '暂无抓包记录') + '</div>';
+      return;
+    }
+    list.innerHTML = entries.map(function(ev){
+      var openAttr = state.openCaptures[ev.id] ? ' open' : '';
+      var reps = ev.replacements || [];
+      var restored = ev.restored_items || [];
+      var repHtml = reps.length ? ('<table><thead><tr><th>原文</th><th>替换值 / 占位符</th><th>类型</th><th>方式</th><th>动作</th></tr></thead><tbody>' +
+        reps.map(function(r){
+          var orig = r.original ? '<span class="orig-val">' + esc(r.original) + '</span>' : '<span class="sub">(未替换 · 仅告警)</span>';
+          return '<tr><td class="mono">' + orig + '</td><td class="mono ph-val">' + esc(r.placeholder || '-') + '</td><td class="mono">' + esc(r.kind) + '</td><td class="mono">' + esc(r.by || '-') + '</td><td class="mono">' + esc(actionLabel(r.action || 'mask')) + '</td></tr>';
+        }).join('') + '</tbody></table>') : '<div class="sub">请求阶段无敏感替换</div>';
+      var resHtml = restored.length ? ('<table><thead><tr><th>占位符</th><th>还原原文</th><th>次数</th></tr></thead><tbody>' +
+        restored.map(function(r){
+          return '<tr><td class="mono ph-val">' + esc(r.placeholder) + '</td><td class="mono orig-val">' + esc(r.original || '-') + '</td><td class="mono">' + (r.count || 0) + '</td></tr>';
+        }).join('') + '</tbody></table>') : '';
+      var upText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + fmtBytes(ev.upstream_response_bytes || 0) + ']') : prettyText(ev.upstream_response);
+      var reText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + fmtBytes(ev.restored_response_bytes || 0) + ']') : prettyText(ev.restored_response);
+      return '<details class="cap-item" data-cap-id="' + ev.id + '"' + openAttr + '>' +
+        '<summary class="cap-summary">' +
+          '<span class="mono"><strong>#' + ev.id + '</strong> ' + esc(shortTime(ev.timestamp)) + ' · ' + esc(ev.protocol || '-') + (ev.model ? ' / ' + esc(ev.model) : '') + (ev.stream ? ' [SSE]' : '') + '</span>' +
+          '<span class="actions"><span class="badge ' + actionClass(ev.action) + '">' + esc(actionLabel(ev.action)) + '</span><span class="sub mono">替换 ' + reps.length + ' · 还原 ' + (ev.restored_count || 0) + '</span></span>' +
+        '</summary>' +
+        '<div class="cap-body">' +
+          (ev.error ? '<div class="err-box">' + esc(ev.error) + '</div>' : '') +
+          '<div><div class="diff-title"><span>请求替换明细 (' + reps.length + ')</span></div>' + repHtml + '</div>' +
+          (resHtml ? '<div><div class="diff-title"><span>响应还原明细 (' + (ev.restored_count || 0) + ')</span></div>' + resHtml + '</div>' : '') +
+          '<div class="diff-grid">' +
+            '<div class="diff-pane"><div class="diff-title"><span>原始请求 (Raw)</span><span class="mono">' + fmtBytes(ev.raw_request_bytes || 0) + (ev.raw_request_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + esc(prettyText(ev.raw_request)) + '</pre></div>' +
+            '<div class="diff-pane"><div class="diff-title"><span>脱敏请求 (Masked → 上游)</span><span class="mono">' + fmtBytes(ev.masked_request_bytes || 0) + (ev.masked_request_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + esc(prettyText(ev.masked_request)) + '</pre></div>' +
+          '</div>' +
+          '<div class="diff-grid">' +
+            '<div class="diff-pane"><div class="diff-title"><span>上游原始响应 (Upstream)</span><span class="mono">' + fmtBytes(ev.upstream_response_bytes || 0) + (ev.upstream_response_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + esc(upText) + '</pre></div>' +
+            '<div class="diff-pane"><div class="diff-title"><span>还原后响应 (Restored → 客户端)</span><span class="mono">' + fmtBytes(ev.restored_response_bytes || 0) + (ev.restored_response_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + esc(reText) + '</pre></div>' +
+          '</div>' +
+        '</div></details>';
+    }).join('');
+    Array.prototype.forEach.call(list.querySelectorAll('details[data-cap-id]'), function(el){
+      el.ontoggle = function(){ state.openCaptures[el.getAttribute('data-cap-id')] = el.open; };
+    });
+  }
+
+  async function callCapture(method, body){
+    if(!state.key) return;
+    var errEl = document.getElementById('cap-err');
+    errEl.textContent = '';
+    errEl.classList.add('hidden');
+    try{
+      var headers = {'Authorization': 'Bearer ' + state.key, 'Accept': 'application/json'};
+      var opts = {method: method, headers: headers};
+      if(body !== undefined){
+        headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(body);
+      }
+      var resp = await fetch(DEBUG_CAPTURE_URL, opts);
+      if(resp.status === 401 || resp.status === 403){
+        showAuth('管理密钥无效或无权限 (HTTP ' + resp.status + ')');
+        return;
+      }
+      var data = await resp.json();
+      if(!resp.ok){
+        errEl.textContent = data.error || ('HTTP ' + resp.status);
+        errEl.classList.remove('hidden');
+        return;
+      }
+      renderCapture(data);
+    }catch(e){
+      errEl.textContent = '抓包请求失败: ' + e;
+      errEl.classList.remove('hidden');
+    }
+  }
+
+  window.loadCapture = function(){ return callCapture('GET'); };
+  window.toggleCapture = function(){
+    if(state.captureEnabled){ return callCapture('POST', {enabled: false}); }
+    var ttl = parseInt(document.getElementById('cap-ttl').value || '300', 10);
+    return callCapture('POST', {enabled: true, ttl_seconds: ttl});
+  };
+  window.clearCapture = function(){
+    state.openCaptures = {};
+    return callCapture('DELETE');
   };
 
   window.runPreview = async function(){
@@ -1069,6 +1333,7 @@ func renderDashboardHTML(st engine.Status, baseURL, actionFilter string, eventLi
 		BaseURL:         baseURL,
 		JSONURL:         managementBasePath + managementStatusPath + "?format=json",
 		PreviewURL:      managementBasePath + managementPreviewPath,
+		DebugCaptureURL: managementBasePath + managementDebugCapturePath,
 		ActionFilter:    actionFilter,
 		EventLimit:      eventLimit,
 		HealthLabel:     healthLabel,

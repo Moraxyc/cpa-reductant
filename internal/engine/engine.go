@@ -310,6 +310,7 @@ type Engine struct {
 	model     *modelRunner
 	stats     engineStats
 	events    *eventRing
+	capture   *debugCapture
 	startedAt time.Time
 
 	metaMu             sync.Mutex
@@ -334,6 +335,7 @@ func New(cfg *config.Config) *Engine {
 	e := &Engine{
 		model:          newModelRunner(cfg.Model),
 		events:         newEventRing(defaultEventRing),
+		capture:        newDebugCapture(defaultCaptureCapacity),
 		startedAt:      time.Now().UTC(),
 		keyPathInitial: keyPath,
 	}
@@ -542,6 +544,43 @@ func (e *Engine) redactOptions(ctx context.Context, cfg *config.Config, route st
 	return options
 }
 
+func (e *Engine) BeginCapture() uint64 {
+	if e == nil || e.capture == nil {
+		return 0
+	}
+	return e.capture.beginIfEnabled()
+}
+
+func (e *Engine) ConfigureDebugCapture(enabled bool, ttl time.Duration, maxEntries int, clear bool) DebugCaptureSnapshot {
+	if e == nil || e.capture == nil {
+		return DebugCaptureSnapshot{Entries: []DebugCaptureEntry{}}
+	}
+	return e.capture.configure(enabled, ttl, maxEntries, clear)
+}
+
+func (e *Engine) ClearDebugCapture() DebugCaptureSnapshot {
+	if e == nil || e.capture == nil {
+		return DebugCaptureSnapshot{Entries: []DebugCaptureEntry{}}
+	}
+	return e.capture.clear()
+}
+
+func (e *Engine) DebugCaptureSnapshot(limit int, idFilter uint64, protocolFilter, modelFilter string) DebugCaptureSnapshot {
+	if e == nil || e.capture == nil {
+		return DebugCaptureSnapshot{Entries: []DebugCaptureEntry{}}
+	}
+	return e.capture.snapshot(limit, idFilter, protocolFilter, modelFilter)
+}
+
+func (e *Engine) CaptureError(captureID uint64, err error) {
+	if e == nil || e.capture == nil || captureID == 0 || err == nil {
+		return
+	}
+	e.capture.update(captureID, func(ev *DebugCaptureEntry) {
+		ev.Error = err.Error()
+	})
+}
+
 func (e *Engine) MaskJSON(route string, body []byte) ([]byte, error) {
 	return e.MaskJSONContext(context.Background(), route, body)
 }
@@ -554,6 +593,10 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 	start := time.Now()
 	e.lockKeyPath()
 	cfg := e.Config()
+	captureID := meta.CaptureID
+	if captureID == 0 {
+		captureID = e.BeginCapture()
+	}
 	blocked := false
 	var hits []redact.Hit
 	var modelErr error
@@ -570,6 +613,7 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 	defer func() {
 		if rec := recover(); rec != nil {
 			dur := time.Since(start)
+			durMS := float64(dur.Microseconds()) / 1000.0
 			out = nil
 			err = fmt.Errorf("redaction panic: %v", rec)
 			e.stats.recordMaskError(meta.Protocol, meta.Model, len(body), dur)
@@ -579,10 +623,25 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 				Protocol:   meta.Protocol,
 				Model:      meta.Model,
 				Action:     "error",
-				DurationMS: float64(dur.Microseconds()) / 1000.0,
+				DurationMS: durMS,
 				Bytes:      len(body),
 				Error:      err.Error(),
 			})
+			if captureID != 0 && e.capture != nil {
+				rawStr, rawBytes, rawTrunc := truncateCaptureBytes(body, maxCaptureBodyBytes)
+				e.capture.recordRequest(DebugCaptureEntry{
+					ID:                  captureID,
+					Protocol:            meta.Protocol,
+					Model:               meta.Model,
+					Stream:              meta.Stream,
+					Action:              "error",
+					MaskDurationMS:      durMS,
+					RawRequest:          rawStr,
+					RawRequestTruncated: rawTrunc,
+					RawRequestBytes:     rawBytes,
+					Error:               err.Error(),
+				})
+			}
 			e.logEvent("error", meta.HostCallbackID, "cpa-reductant request redaction panic", map[string]any{
 				"protocol": meta.Protocol,
 				"model":    meta.Model,
@@ -605,6 +664,21 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 			Bytes:      len(body),
 			Error:      modelErr.Error(),
 		})
+		if captureID != 0 && e.capture != nil {
+			rawStr, rawBytes, rawTrunc := truncateCaptureBytes(body, maxCaptureBodyBytes)
+			e.capture.recordRequest(DebugCaptureEntry{
+				ID:                  captureID,
+				Protocol:            meta.Protocol,
+				Model:               meta.Model,
+				Stream:              meta.Stream,
+				Action:              "error",
+				MaskDurationMS:      durMS,
+				RawRequest:          rawStr,
+				RawRequestTruncated: rawTrunc,
+				RawRequestBytes:     rawBytes,
+				Error:               modelErr.Error(),
+			})
+		}
 		e.logEvent("warn", meta.HostCallbackID, "cpa-reductant strict local model unavailable", map[string]any{
 			"protocol": meta.Protocol,
 			"model":    meta.Model,
@@ -646,6 +720,30 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 		Bytes:      len(body),
 		Hits:       toEventHits(hits),
 	})
+
+	if captureID != 0 && e.capture != nil {
+		rawStr, rawBytes, rawTrunc := truncateCaptureBytes(body, maxCaptureBodyBytes)
+		maskedStr, maskedBytes, maskedTrunc := truncateCaptureBytes(masked, maxCaptureBodyBytes)
+		entry := DebugCaptureEntry{
+			ID:                     captureID,
+			Protocol:               meta.Protocol,
+			Model:                  meta.Model,
+			Stream:                 meta.Stream,
+			Action:                 action,
+			MaskDurationMS:         durMS,
+			RawRequest:             rawStr,
+			RawRequestTruncated:    rawTrunc,
+			RawRequestBytes:        rawBytes,
+			MaskedRequest:          maskedStr,
+			MaskedRequestTruncated: maskedTrunc,
+			MaskedRequestBytes:     maskedBytes,
+			Replacements:           resolveCaptureReplacements(hits, cfg.Shape),
+		}
+		if blocked {
+			entry.Error = ErrBlocked.Error()
+		}
+		e.capture.recordRequest(entry)
+	}
 
 	if blocked {
 		e.logEvent("warn", meta.HostCallbackID, "cpa-reductant blocked request by policy", map[string]any{
@@ -714,11 +812,32 @@ func (e *Engine) RestoreResponseWithMeta(meta RequestMeta, contentType string, b
 	if len(body) == 0 || IsBinaryContentType(contentType) {
 		dur := time.Since(start)
 		e.stats.recordRestore(meta.Protocol, meta.Model, false, len(body), 0, false, dur)
+		if meta.CaptureID != 0 && e.capture != nil {
+			durMS := roundMS(float64(dur.Microseconds()) / 1000.0)
+			binary := IsBinaryContentType(contentType)
+			e.capture.update(meta.CaptureID, func(ev *DebugCaptureEntry) {
+				ev.RestoreDurationMS = durMS
+				ev.ResponseBinary = binary
+				ev.ResponseContentType = contentType
+				ev.UpstreamResponseBytes = len(body)
+				ev.RestoredResponseBytes = len(body)
+			})
+		}
 		return body, 0
 	}
 	if config.NormalizeProtocol(meta.Protocol) == config.ProtocolOpenAISpeech && !json.Valid(body) {
 		dur := time.Since(start)
 		e.stats.recordRestore(meta.Protocol, meta.Model, false, len(body), 0, false, dur)
+		if meta.CaptureID != 0 && e.capture != nil {
+			durMS := roundMS(float64(dur.Microseconds()) / 1000.0)
+			e.capture.update(meta.CaptureID, func(ev *DebugCaptureEntry) {
+				ev.RestoreDurationMS = durMS
+				ev.ResponseBinary = true
+				ev.ResponseContentType = contentType
+				ev.UpstreamResponseBytes = len(body)
+				ev.RestoredResponseBytes = len(body)
+			})
+		}
 		return body, 0
 	}
 
@@ -734,7 +853,8 @@ func (e *Engine) RestoreResponseWithMeta(meta RequestMeta, contentType string, b
 	w.Finish()
 
 	out := buf.Bytes()
-	restoredCount := sumPutCounts(w.Put())
+	put := w.Put()
+	restoredCount := sumPutCounts(put)
 	dur := time.Since(start)
 
 	e.stats.recordRestore(meta.Protocol, meta.Model, false, len(out), restoredCount, false, dur)
@@ -750,7 +870,89 @@ func (e *Engine) RestoreResponseWithMeta(meta RequestMeta, contentType string, b
 			RestoredCount: restoredCount,
 		})
 	}
+	if meta.CaptureID != 0 && e.capture != nil {
+		cfg := e.Config()
+		shape := cfg != nil && cfg.Shape
+		upStr, upBytes, upTrunc := truncateCaptureBytes(body, maxCaptureBodyBytes)
+		resStr, resBytes, resTrunc := truncateCaptureBytes(out, maxCaptureBodyBytes)
+		durMS := roundMS(float64(dur.Microseconds()) / 1000.0)
+		items := resolveCaptureRestoredItems(put, shape)
+		e.capture.update(meta.CaptureID, func(ev *DebugCaptureEntry) {
+			ev.RestoreDurationMS = durMS
+			ev.ResponseContentType = contentType
+			ev.UpstreamResponse = upStr
+			ev.UpstreamResponseBytes = upBytes
+			ev.UpstreamResponseTruncated = upTrunc
+			ev.RestoredResponse = resStr
+			ev.RestoredResponseBytes = resBytes
+			ev.RestoredResponseTruncated = resTrunc
+			ev.RestoredCount = restoredCount
+			ev.RestoredItems = items
+		})
+	}
 	return out, restoredCount
+}
+
+func (e *Engine) RecordStreamCapture(
+	captureID uint64,
+	contentType string,
+	upstream []byte,
+	upstreamTotal int,
+	upstreamTruncated bool,
+	restored []byte,
+	restoredTotal int,
+	restoredTruncated bool,
+	put map[string]int,
+	dur time.Duration,
+	err error,
+) {
+	if e == nil || e.capture == nil || captureID == 0 {
+		return
+	}
+	cfg := e.Config()
+	shape := cfg != nil && cfg.Shape
+	binary := IsBinaryContentType(contentType)
+	var upStr, resStr string
+	var upTrunc, resTrunc bool
+	if !binary {
+		var actualUpTotal, actualResTotal int
+		upStr, actualUpTotal, upTrunc = truncateCaptureBytes(upstream, maxCaptureBodyBytes)
+		if upstreamTotal > actualUpTotal {
+			actualUpTotal = upstreamTotal
+		}
+		if upstreamTruncated {
+			upTrunc = true
+		}
+		upstreamTotal = actualUpTotal
+
+		resStr, actualResTotal, resTrunc = truncateCaptureBytes(restored, maxCaptureBodyBytes)
+		if restoredTotal > actualResTotal {
+			actualResTotal = restoredTotal
+		}
+		if restoredTruncated {
+			resTrunc = true
+		}
+		restoredTotal = actualResTotal
+	}
+	restoredCount := sumPutCounts(put)
+	items := resolveCaptureRestoredItems(put, shape)
+	durMS := roundMS(float64(dur.Microseconds()) / 1000.0)
+	e.capture.update(captureID, func(ev *DebugCaptureEntry) {
+		ev.RestoreDurationMS = durMS
+		ev.ResponseBinary = binary
+		ev.ResponseContentType = contentType
+		ev.UpstreamResponse = upStr
+		ev.UpstreamResponseBytes = upstreamTotal
+		ev.UpstreamResponseTruncated = upTrunc
+		ev.RestoredResponse = resStr
+		ev.RestoredResponseBytes = restoredTotal
+		ev.RestoredResponseTruncated = resTrunc
+		ev.RestoredCount = restoredCount
+		ev.RestoredItems = items
+		if err != nil {
+			ev.Error = err.Error()
+		}
+	})
 }
 
 func (e *Engine) RecordStreamRestore(meta RequestMeta, bytesOut int, put map[string]int, dur time.Duration, err error) {
