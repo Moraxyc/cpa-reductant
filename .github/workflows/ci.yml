@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Nix Checks & Portable Cross Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Reclaim disk space with Nothing but Nix
+        uses: wimpysworld/nothing-but-nix@v12
+        with:
+          hatchet-protocol: cleave
+
+      - name: Install Nix
+        uses: NixOS/nix-installer-action@v1
+        with:
+          extra-conf: |
+            build-dir = /nix/build
+
+      - name: Setup Attic cache
+        if: ${{ (vars.ATTIC_ENDPOINT || secrets.ATTIC_ENDPOINT) != '' && (vars.ATTIC_CACHE || secrets.ATTIC_CACHE) != '' }}
+        uses: ryanccn/attic-action@v0
+        with:
+          endpoint: ${{ vars.ATTIC_ENDPOINT || secrets.ATTIC_ENDPOINT }}
+          cache: ${{ vars.ATTIC_CACHE || secrets.ATTIC_CACHE }}
+          token: ${{ secrets.ATTIC_TOKEN }}
+          inputs-from: .
+          skip-push: ${{ github.event_name == 'pull_request' || secrets.ATTIC_TOKEN == '' }}
+
+      - name: Run Nix flake checks
+        run: nix flake check --print-build-logs
+
+      - name: Build portable packages
+        run: |
+          for target in linux-amd64 linux-arm64 windows-amd64 windows-arm64; do
+            nix build ".#portable-$target" -o "result-$target" --print-build-logs
+            mkdir -p "dist/$target"
+            cp -L "result-$target/lib/"* "result-$target/include/"* "dist/$target/"
+          done
+
+      - name: Upload portable artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: cpa-reductant-portable
+          path: dist/
+          if-no-files-found: error

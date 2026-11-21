@@ -62,6 +62,36 @@
           packages = {
             cpa-reductant = pkgs.callPackage ./nix/package.nix { };
             default = config.packages.cpa-reductant;
+          }
+          // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            portable-linux-amd64 = pkgs.callPackage ./nix/portable.nix {
+              inherit (config.packages) cpa-reductant;
+              goos = "linux";
+              goarch = "amd64";
+              zigTarget = "x86_64-linux-gnu.2.28";
+              ext = ".so";
+            };
+            portable-linux-arm64 = pkgs.callPackage ./nix/portable.nix {
+              inherit (config.packages) cpa-reductant;
+              goos = "linux";
+              goarch = "arm64";
+              zigTarget = "aarch64-linux-gnu.2.28";
+              ext = ".so";
+            };
+            portable-windows-amd64 = pkgs.callPackage ./nix/portable.nix {
+              inherit (config.packages) cpa-reductant;
+              goos = "windows";
+              goarch = "amd64";
+              zigTarget = "x86_64-windows-gnu";
+              ext = ".dll";
+            };
+            portable-windows-arm64 = pkgs.callPackage ./nix/portable.nix {
+              inherit (config.packages) cpa-reductant;
+              goos = "windows";
+              goarch = "arm64";
+              zigTarget = "aarch64-windows-gnu";
+              ext = ".dll";
+            };
           };
 
           overlayAttrs = {

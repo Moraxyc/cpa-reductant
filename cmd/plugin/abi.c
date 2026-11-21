@@ -14,6 +14,11 @@ static void shutdown_plugin(void) {
     plugin_shutdown();
 }
 
+#if defined(_WIN32)
+__declspec(dllexport)
+#else
+__attribute__((visibility("default")))
+#endif
 int cliproxy_plugin_init(const host_api *api, plugin_api *plugin) {
     if (!api || api->version != 1 || !api->call || !api->release || !plugin) return 1;
     host = api;
