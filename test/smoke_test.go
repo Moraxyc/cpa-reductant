@@ -21,16 +21,25 @@ import (
 )
 
 const (
-	smokeModel           = "claude-sonnet-test"
-	smokeUnselectedModel = "claude-haiku-test"
-	smokeTerm            = "SYNTHETIC-PRIVATE-PROJECT-ZEBRA"
-	smokeBlockedTerm     = "SYNTHETIC-BLOCKED-PROJECT"
+	smokeClaudeModel       = "claude-sonnet-test"
+	smokeOpenAIModel       = "gpt-chat-test"
+	smokeCodexModel        = "gpt-5-codex-test"
+	smokeGeminiModel       = "gemini-2.5-test"
+	smokeInteractionsModel = "gemini-2.5-interactions-test"
+	smokeImageModel        = "grok-imagine-image"
+	smokeSpeechModel       = "grok-tts"
+	smokeVideoModel        = "grok-imagine-video"
+	smokeUnselectedModel   = "claude-haiku-test"
+
+	smokeTerm        = "SYNTHETIC-PRIVATE-PROJECT-ZEBRA"
+	smokeBlockedTerm = "SYNTHETIC-BLOCKED-PROJECT"
 )
 
 var placeholderPattern = regexp.MustCompile(`\{\{TERM_[a-z2-7]{8}\}\}`)
 
 type recordedRequest struct {
 	Path string
+	Raw  string
 	Body map[string]any
 }
 
@@ -70,15 +79,94 @@ func (m *mockProvider) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m.mu.Lock()
-	m.requests = append(m.requests, recordedRequest{Path: r.URL.Path, Body: body})
+	m.requests = append(m.requests, recordedRequest{Path: r.URL.Path, Raw: string(raw), Body: body})
 	m.mu.Unlock()
 
-	msgsBytes, _ := json.Marshal(body["messages"])
 	text := smokeTerm
-	if match := placeholderPattern.FindString(string(msgsBytes)); match != "" {
+	if match := placeholderPattern.FindString(string(raw)); match != "" {
 		text = match
 	}
 
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/v1/messages/count_tokens"):
+		writeJSON(w, map[string]any{"input_tokens": 42})
+
+	case strings.HasSuffix(r.URL.Path, "/v1/messages"):
+		m.handleClaude(w, body, text)
+
+	case strings.HasSuffix(r.URL.Path, "/chat/completions"):
+		m.handleOpenAIChat(w, body, text)
+
+	case strings.HasSuffix(r.URL.Path, "/responses/compact"):
+		writeJSON(w, map[string]any{
+			"id":     "cmp_mock",
+			"object": "response.compaction",
+			"output": []map[string]any{{
+				"id":      "msg_1",
+				"type":    "message",
+				"role":    "assistant",
+				"status":  "completed",
+				"content": []map[string]any{{"type": "output_text", "text": text}},
+			}},
+		})
+
+	case strings.HasSuffix(r.URL.Path, "/responses"):
+		m.handleResponses(w, body, text)
+
+	case strings.Contains(r.URL.Path, ":generateContent"):
+		writeJSON(w, map[string]any{
+			"candidates": []map[string]any{{
+				"content":      map[string]any{"role": "model", "parts": []map[string]any{{"text": text}}},
+				"finishReason": "STOP",
+			}},
+		})
+
+	case strings.Contains(r.URL.Path, ":streamGenerateContent"):
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		mid := len(text) / 2
+		frames := []string{
+			"data: " + string(mustMarshal(map[string]any{
+				"candidates": []map[string]any{{
+					"content": map[string]any{"role": "model", "parts": []map[string]any{{"text": text[:mid]}}},
+				}},
+			})) + "\n\n",
+			"data: " + string(mustMarshal(map[string]any{
+				"candidates": []map[string]any{{
+					"content":      map[string]any{"role": "model", "parts": []map[string]any{{"text": text[mid:]}}},
+					"finishReason": "STOP",
+				}},
+			})) + "\n\n",
+		}
+		writeFrames(w, flusher, frames)
+
+	case strings.HasSuffix(r.URL.Path, "/interactions"):
+		m.handleInteractions(w, body, text)
+
+	case strings.HasSuffix(r.URL.Path, "/images/generations"):
+		writeJSON(w, map[string]any{
+			"created": 1,
+			"data": []map[string]any{{
+				"url":            "https://example.com/mock.png",
+				"revised_prompt": text,
+			}},
+		})
+
+	case strings.HasSuffix(r.URL.Path, "/tts"):
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ID3MOCKAUDIO"))
+
+	case strings.HasSuffix(r.URL.Path, "/videos/generations"):
+		writeJSON(w, map[string]any{"request_id": "vid_mock_1"})
+
+	default:
+		http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+	}
+}
+
+func (m *mockProvider) handleClaude(w http.ResponseWriter, body map[string]any, text string) {
 	msg := map[string]any{
 		"id":            "msg_mock",
 		"type":          "message",
@@ -89,12 +177,10 @@ func (m *mockProvider) handle(w http.ResponseWriter, r *http.Request) {
 		"stop_sequence": nil,
 		"usage":         map[string]any{"input_tokens": 12, "output_tokens": 1},
 	}
-
 	if stream, _ := body["stream"].(bool); stream {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
-
 		mid := len(text) / 2
 		frames := []string{
 			sseEvent("message_start", map[string]any{"message": msg}),
@@ -108,21 +194,138 @@ func (m *mockProvider) handle(w http.ResponseWriter, r *http.Request) {
 			}),
 			sseEvent("message_stop", nil),
 		}
-		for _, frame := range frames {
-			_, _ = io.WriteString(w, frame)
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
+		writeFrames(w, flusher, frames)
 		return
 	}
-
 	msg["content"] = []map[string]any{{"type": "text", "text": text}}
 	msg["stop_reason"] = "end_turn"
-	data, _ := json.Marshal(msg)
+	writeJSON(w, msg)
+}
+
+func (m *mockProvider) handleOpenAIChat(w http.ResponseWriter, body map[string]any, text string) {
+	if stream, _ := body["stream"].(bool); stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		mid := len(text) / 2
+		frames := []string{
+			"data: " + string(mustMarshal(map[string]any{
+				"id":      "chatcmpl-mock",
+				"object":  "chat.completion.chunk",
+				"model":   body["model"],
+				"choices": []map[string]any{{"index": 0, "delta": map[string]any{"role": "assistant", "content": text[:mid]}}},
+			})) + "\n\n",
+			"data: " + string(mustMarshal(map[string]any{
+				"id":      "chatcmpl-mock",
+				"object":  "chat.completion.chunk",
+				"model":   body["model"],
+				"choices": []map[string]any{{"index": 0, "delta": map[string]any{"content": text[mid:]}}},
+			})) + "\n\n",
+			"data: " + string(mustMarshal(map[string]any{
+				"id":      "chatcmpl-mock",
+				"object":  "chat.completion.chunk",
+				"model":   body["model"],
+				"choices": []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+			})) + "\n\n",
+			"data: [DONE]\n\n",
+		}
+		writeFrames(w, flusher, frames)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"id":      "chatcmpl-mock",
+		"object":  "chat.completion",
+		"model":   body["model"],
+		"choices": []map[string]any{{"index": 0, "message": map[string]any{"role": "assistant", "content": text}, "finish_reason": "stop"}},
+	})
+}
+
+func (m *mockProvider) handleResponses(w http.ResponseWriter, body map[string]any, text string) {
+	respObj := map[string]any{
+		"id":     "resp_mock",
+		"object": "response",
+		"status": "completed",
+		"model":  body["model"],
+		"output": []map[string]any{{
+			"id":      "msg_1",
+			"type":    "message",
+			"role":    "assistant",
+			"status":  "completed",
+			"content": []map[string]any{{"type": "output_text", "text": text}},
+		}},
+	}
+	if stream, _ := body["stream"].(bool); stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		mid := len(text) / 2
+		frames := []string{
+			sseEvent("response.created", map[string]any{"response": map[string]any{"id": "resp_mock", "status": "in_progress"}}),
+			sseEvent("response.output_text.delta", map[string]any{
+				"item_id":       "msg_1",
+				"output_index":  0,
+				"content_index": 0,
+				"delta":         text[:mid],
+			}),
+			sseEvent("response.output_text.delta", map[string]any{
+				"item_id":       "msg_1",
+				"output_index":  0,
+				"content_index": 0,
+				"delta":         text[mid:],
+			}),
+			sseEvent("response.completed", map[string]any{"response": respObj}),
+		}
+		writeFrames(w, flusher, frames)
+		return
+	}
+	writeJSON(w, respObj)
+}
+
+func (m *mockProvider) handleInteractions(w http.ResponseWriter, body map[string]any, text string) {
+	if stream, _ := body["stream"].(bool); stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		mid := len(text) / 2
+		frames := []string{
+			sseEvent("interaction.created", map[string]any{"event_type": "interaction.created", "interaction": map[string]any{"id": "int_1", "model": body["model"]}}),
+			sseEvent("step.delta", map[string]any{"event_type": "step.delta", "index": 0, "delta": map[string]any{"type": "text", "text": text[:mid]}}),
+			sseEvent("step.delta", map[string]any{"event_type": "step.delta", "index": 0, "delta": map[string]any{"type": "text", "text": text[mid:]}}),
+			sseEvent("interaction.completed", map[string]any{"event_type": "interaction.completed", "interaction": map[string]any{"id": "int_1", "status": "completed"}}),
+		}
+		writeFrames(w, flusher, frames)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"id":     "int_1",
+		"model":  body["model"],
+		"status": "completed",
+		"steps": []map[string]any{{
+			"type":    "model",
+			"content": []map[string]any{{"type": "text", "text": text}},
+		}},
+	})
+}
+
+func writeFrames(w http.ResponseWriter, flusher http.Flusher, frames []string) {
+	for _, frame := range frames {
+		_, _ = io.WriteString(w, frame)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	data := mustMarshal(v)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+func mustMarshal(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
 }
 
 func sseEvent(name string, fields map[string]any) string {
@@ -176,16 +379,70 @@ api-keys:
         - api-key: test-upstream-key
           cloak:
             mode: never
+  codex:
+    - name: mock-codex
+      base-url: %s
+      proxy-url: direct
+      models:
+        - name: %s
+      keys:
+        - api-key: test-upstream-key
+  gemini:
+    - name: mock-gemini
+      base-url: %s
+      proxy-url: direct
+      models:
+        - name: %s
+      keys:
+        - api-key: test-upstream-key
+  interactions:
+    - name: mock-interactions
+      base-url: %s
+      proxy-url: direct
+      models:
+        - name: %s
+      keys:
+        - api-key: test-upstream-key
+  xai:
+    - name: mock-xai
+      base-url: %s
+      proxy-url: direct
+      models:
+        - name: %s
+        - name: %s
+        - name: %s
+      keys:
+        - api-key: test-upstream-key
+  openai-compatibility:
+    - name: mock-openai
+      base-url: %s/v1
+      proxy-url: direct
+      models:
+        - name: %s
+      keys:
+        - api-key: test-upstream-key
 plugins:
   enabled: true
   dir: %q
   configs:
     cpa-reductant:
       enabled: true
-      models: [%s]
+      models: [%s, %s, %s, %s, %s, %s, %s, %s]
       words: [%s, %s]
       block_terms: %t
-`, port, filepath.Join(workDir, "auth"), upstreamURL, smokeModel, smokeUnselectedModel, filepath.Join(workDir, "plugins"), smokeModel, smokeTerm, smokeBlockedTerm, blockTerms)
+`,
+		port,
+		filepath.Join(workDir, "auth"),
+		upstreamURL, smokeClaudeModel, smokeUnselectedModel,
+		upstreamURL, smokeCodexModel,
+		upstreamURL, smokeGeminiModel,
+		upstreamURL, smokeInteractionsModel,
+		upstreamURL, smokeImageModel, smokeSpeechModel, smokeVideoModel,
+		upstreamURL, smokeOpenAIModel,
+		filepath.Join(workDir, "plugins"),
+		smokeClaudeModel, smokeOpenAIModel, smokeCodexModel, smokeGeminiModel, smokeInteractionsModel, smokeImageModel, smokeSpeechModel, smokeVideoModel,
+		smokeTerm, smokeBlockedTerm, blockTerms,
+	)
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -234,32 +491,43 @@ func startHost(t *testing.T, hostBin, workDir, configPath, baseURL string) func(
 	return nil
 }
 
-func callMessages(t *testing.T, baseURL, model, text string, stream bool) (int, []byte) {
+func doJSONPost(t *testing.T, url string, headers map[string]string, body any) (int, []byte) {
 	t.Helper()
-	payload, _ := json.Marshal(map[string]any{
-		"model":      model,
-		"max_tokens": 128,
-		"stream":     stream,
-		"messages":   []map[string]any{{"role": "user", "content": text}},
-	})
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/messages", bytes.NewReader(payload))
+	payload, _ := json.Marshal(body)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		t.Fatalf("new request: %v", err)
+		t.Fatalf("new request %s: %v", url, err)
 	}
-	req.Header.Set("x-api-key", "test-frontend-key")
-	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("Authorization", "Bearer test-frontend-key")
 	req.Header.Set("Content-Type", "application/json")
-
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	resp, err := (&http.Client{Timeout: 12 * time.Second}).Do(req)
 	if err != nil {
-		t.Fatalf("POST /v1/messages: %v", err)
+		t.Fatalf("POST %s: %v", url, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	out, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read response: %v", err)
+		t.Fatalf("read %s: %v", url, err)
 	}
-	return resp.StatusCode, body
+	return resp.StatusCode, out
+}
+
+func expectLastUpstreamMasked(t *testing.T, upstream *mockProvider, wantCount int, wantPathSubstr string) {
+	t.Helper()
+	reqs := upstream.Requests()
+	if len(reqs) != wantCount {
+		t.Fatalf("expected %d upstream requests, got %d", wantCount, len(reqs))
+	}
+	req := reqs[len(reqs)-1]
+	if !strings.Contains(req.Path, wantPathSubstr) {
+		t.Fatalf("unexpected upstream path %q, want substring %q", req.Path, wantPathSubstr)
+	}
+	if strings.Contains(req.Raw, smokeTerm) || !placeholderPattern.MatchString(req.Raw) {
+		t.Fatalf("expected masked upstream request without %q, got %s", smokeTerm, req.Raw)
+	}
 }
 
 func TestSmokeCPA(t *testing.T) {
@@ -294,51 +562,37 @@ func TestSmokeCPA(t *testing.T) {
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	configPath := filepath.Join(workDir, "config.yaml")
 
-	expectMasked := func(req recordedRequest) {
-		t.Helper()
-		raw, _ := json.Marshal(req.Body)
-		if req.Path != "/v1/messages" {
-			t.Fatalf("unexpected upstream path %q", req.Path)
-		}
-		if req.Body["model"] != smokeModel {
-			t.Fatalf("expected original model %q, got %v", smokeModel, req.Body["model"])
-		}
-		if strings.Contains(string(raw), smokeTerm) || !placeholderPattern.Match(raw) {
-			t.Fatalf("expected masked request without %q, got %s", smokeTerm, raw)
-		}
-	}
-
-	// Phase 1: mask + restore (JSON & SSE) + unselected model passthrough
+	// Phase 1: mask + restore across all CPA formats + count_tokens + unselected passthrough
 	writeHostConfig(t, configPath, workDir, upstream.server.URL, port, false)
 	stop := startHost(t, hostBin, workDir, configPath, baseURL)
 
-	status, body := callMessages(t, baseURL, smokeModel, smokeTerm, false)
-	if status != http.StatusOK {
-		stop()
-		t.Fatalf("JSON status=%d body=%s", status, body)
-	}
-	var jsonResp struct {
-		Content []struct {
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(body, &jsonResp); err != nil || len(jsonResp.Content) == 0 || jsonResp.Content[0].Text != smokeTerm {
-		stop()
-		t.Fatalf("expected restored JSON text %q, got %s", smokeTerm, body)
-	}
-	reqs := upstream.Requests()
-	if len(reqs) != 1 {
-		stop()
-		t.Fatalf("expected 1 upstream request, got %d", len(reqs))
-	}
-	expectMasked(reqs[0])
+	reqCount := 0
+	claudeHeaders := map[string]string{"x-api-key": "test-frontend-key", "anthropic-version": "2023-06-01"}
 
-	status, body = callMessages(t, baseURL, smokeModel, smokeTerm, true)
+	// 1. Claude /v1/messages (JSON & SSE) + /v1/messages/count_tokens
+	status, body := doJSONPost(t, baseURL+"/v1/messages", claudeHeaders, map[string]any{
+		"model":      smokeClaudeModel,
+		"max_tokens": 128,
+		"messages":   []map[string]any{{"role": "user", "content": smokeTerm}},
+	})
+	if status != http.StatusOK || !strings.Contains(string(body), smokeTerm) {
+		stop()
+		t.Fatalf("Claude JSON status=%d body=%s", status, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/v1/messages")
+
+	status, body = doJSONPost(t, baseURL+"/v1/messages", claudeHeaders, map[string]any{
+		"model":      smokeClaudeModel,
+		"max_tokens": 128,
+		"stream":     true,
+		"messages":   []map[string]any{{"role": "user", "content": smokeTerm}},
+	})
 	if status != http.StatusOK {
 		stop()
-		t.Fatalf("SSE status=%d body=%s", status, body)
+		t.Fatalf("Claude SSE status=%d body=%s", status, body)
 	}
-	var deltas strings.Builder
+	var claudeDeltas strings.Builder
 	var lastType string
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	for scanner.Scan() {
@@ -354,53 +608,350 @@ func TestSmokeCPA(t *testing.T) {
 		}
 		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &frame); err != nil {
 			stop()
-			t.Fatalf("decode SSE frame %q: %v", line, err)
+			t.Fatalf("decode Claude SSE %q: %v", line, err)
 		}
 		lastType = frame.Type
 		if frame.Type == "content_block_delta" {
-			deltas.WriteString(frame.Delta.Text)
+			claudeDeltas.WriteString(frame.Delta.Text)
 		}
 	}
-	if deltas.String() != smokeTerm || lastType != "message_stop" {
+	if claudeDeltas.String() != smokeTerm || lastType != "message_stop" {
 		stop()
-		t.Fatalf("expected restored SSE %q ending with message_stop, got text=%q last=%q\n%s", smokeTerm, deltas.String(), lastType, body)
+		t.Fatalf("Claude SSE restored=%q last=%q\n%s", claudeDeltas.String(), lastType, body)
 	}
-	reqs = upstream.Requests()
-	if len(reqs) != 2 {
-		stop()
-		t.Fatalf("expected 2 upstream requests, got %d", len(reqs))
-	}
-	expectMasked(reqs[1])
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/v1/messages")
 
-	status, body = callMessages(t, baseURL, smokeUnselectedModel, smokeTerm, false)
+	status, body = doJSONPost(t, baseURL+"/v1/messages/count_tokens", claudeHeaders, map[string]any{
+		"model":    smokeClaudeModel,
+		"messages": []map[string]any{{"role": "user", "content": "hello"}},
+	})
+	if status != http.StatusOK || !strings.Contains(string(body), `"input_tokens"`) {
+		stop()
+		t.Fatalf("Claude count_tokens status=%d body=%s", status, body)
+	}
+	reqCount = len(upstream.Requests())
+
+	// 2. OpenAI /v1/chat/completions (JSON & SSE) + /v1/completions
+	status, body = doJSONPost(t, baseURL+"/v1/chat/completions", nil, map[string]any{
+		"model":    smokeOpenAIModel,
+		"messages": []map[string]any{{"role": "user", "content": smokeTerm}},
+	})
+	if status != http.StatusOK || !strings.Contains(string(body), smokeTerm) {
+		stop()
+		t.Fatalf("OpenAI Chat JSON status=%d body=%s", status, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/chat/completions")
+
+	status, body = doJSONPost(t, baseURL+"/v1/chat/completions", nil, map[string]any{
+		"model":    smokeOpenAIModel,
+		"stream":   true,
+		"messages": []map[string]any{{"role": "user", "content": smokeTerm}},
+	})
+	if status != http.StatusOK {
+		stop()
+		t.Fatalf("OpenAI Chat SSE status=%d body=%s", status, body)
+	}
+	var openaiText strings.Builder
+	sawDone := false
+	scanner = bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		rawData := strings.TrimPrefix(line, "data: ")
+		if rawData == "[DONE]" {
+			sawDone = true
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(rawData), &chunk); err != nil {
+			stop()
+			t.Fatalf("decode OpenAI SSE %q: %v", line, err)
+		}
+		if len(chunk.Choices) > 0 {
+			openaiText.WriteString(chunk.Choices[0].Delta.Content)
+		}
+	}
+	if openaiText.String() != smokeTerm || !sawDone {
+		stop()
+		t.Fatalf("OpenAI Chat SSE restored=%q sawDone=%t\n%s", openaiText.String(), sawDone, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/chat/completions")
+
+	status, body = doJSONPost(t, baseURL+"/v1/completions", nil, map[string]any{
+		"model":  smokeOpenAIModel,
+		"prompt": smokeTerm,
+	})
+	if status != http.StatusOK || !strings.Contains(string(body), smokeTerm) {
+		stop()
+		t.Fatalf("OpenAI Completions JSON status=%d body=%s", status, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/chat/completions")
+
+	// 3. OpenAI Responses /v1/responses (JSON & SSE) + /v1/responses/compact
+	status, body = doJSONPost(t, baseURL+"/v1/responses", nil, map[string]any{
+		"model": smokeCodexModel,
+		"input": smokeTerm,
+	})
+	if status != http.StatusOK || !strings.Contains(string(body), smokeTerm) {
+		stop()
+		t.Fatalf("Responses JSON status=%d body=%s", status, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/responses")
+
+	status, body = doJSONPost(t, baseURL+"/v1/responses", nil, map[string]any{
+		"model":  smokeCodexModel,
+		"stream": true,
+		"input":  smokeTerm,
+	})
+	if status != http.StatusOK {
+		stop()
+		t.Fatalf("Responses SSE status=%d body=%s", status, body)
+	}
+	var respDeltas strings.Builder
+	sawCompleted := false
+	scanner = bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var frame struct {
+			Type  string `json:"type"`
+			Delta string `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &frame); err != nil {
+			stop()
+			t.Fatalf("decode Responses SSE %q: %v", line, err)
+		}
+		if frame.Type == "response.output_text.delta" {
+			respDeltas.WriteString(frame.Delta)
+		}
+		if frame.Type == "response.completed" {
+			sawCompleted = true
+		}
+	}
+	if respDeltas.String() != smokeTerm || !sawCompleted {
+		stop()
+		t.Fatalf("Responses SSE restored=%q completed=%t\n%s", respDeltas.String(), sawCompleted, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/responses")
+
+	status, body = doJSONPost(t, baseURL+"/v1/responses/compact", nil, map[string]any{
+		"model": smokeCodexModel,
+		"input": smokeTerm,
+	})
+	if status != http.StatusOK || !strings.Contains(string(body), smokeTerm) {
+		stop()
+		t.Fatalf("Responses Compact status=%d body=%s", status, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/responses/compact")
+
+	// 4. Gemini /v1beta/models/*:generateContent & :streamGenerateContent
+	status, body = doJSONPost(t, baseURL+"/v1beta/models/"+smokeGeminiModel+":generateContent", nil, map[string]any{
+		"contents": []map[string]any{{"role": "user", "parts": []map[string]any{{"text": smokeTerm}}}},
+	})
+	if status != http.StatusOK || !strings.Contains(string(body), smokeTerm) {
+		stop()
+		t.Fatalf("Gemini JSON status=%d body=%s", status, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, ":generateContent")
+
+	status, body = doJSONPost(t, baseURL+"/v1beta/models/"+smokeGeminiModel+":streamGenerateContent?alt=sse", nil, map[string]any{
+		"contents": []map[string]any{{"role": "user", "parts": []map[string]any{{"text": smokeTerm}}}},
+	})
+	if status != http.StatusOK {
+		stop()
+		t.Fatalf("Gemini SSE status=%d body=%s", status, body)
+	}
+	var gemText strings.Builder
+	scanner = bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var chunk struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk); err != nil {
+			stop()
+			t.Fatalf("decode Gemini SSE %q: %v", line, err)
+		}
+		if len(chunk.Candidates) > 0 && len(chunk.Candidates[0].Content.Parts) > 0 {
+			gemText.WriteString(chunk.Candidates[0].Content.Parts[0].Text)
+		}
+	}
+	if gemText.String() != smokeTerm {
+		stop()
+		t.Fatalf("Gemini SSE restored=%q\n%s", gemText.String(), body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, ":streamGenerateContent")
+
+	// 5. Interactions /v1beta/interactions (JSON & SSE)
+	status, body = doJSONPost(t, baseURL+"/v1beta/interactions", nil, map[string]any{
+		"model": smokeInteractionsModel,
+		"input": smokeTerm,
+	})
+	if status != http.StatusOK || !strings.Contains(string(body), smokeTerm) {
+		stop()
+		t.Fatalf("Interactions JSON status=%d body=%s", status, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/interactions")
+
+	status, body = doJSONPost(t, baseURL+"/v1beta/interactions", nil, map[string]any{
+		"model":  smokeInteractionsModel,
+		"stream": true,
+		"input":  smokeTerm,
+	})
+	if status != http.StatusOK {
+		stop()
+		t.Fatalf("Interactions SSE status=%d body=%s", status, body)
+	}
+	var intText strings.Builder
+	sawIntDone := false
+	scanner = bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var frame struct {
+			EventType string `json:"event_type"`
+			Delta     struct {
+				Text string `json:"text"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &frame); err != nil {
+			stop()
+			t.Fatalf("decode Interactions SSE %q: %v", line, err)
+		}
+		if frame.EventType == "step.delta" {
+			intText.WriteString(frame.Delta.Text)
+		}
+		if frame.EventType == "interaction.completed" {
+			sawIntDone = true
+		}
+	}
+	if intText.String() != smokeTerm || !sawIntDone {
+		stop()
+		t.Fatalf("Interactions SSE restored=%q completed=%t\n%s", intText.String(), sawIntDone, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/interactions")
+
+	// 6. Media protocols: openai-image, openai-speech, openai-video
+	status, body = doJSONPost(t, baseURL+"/v1/images/generations", nil, map[string]any{
+		"model":  smokeImageModel,
+		"prompt": smokeTerm,
+	})
+	if status != http.StatusOK || !strings.Contains(string(body), smokeTerm) {
+		stop()
+		t.Fatalf("OpenAI Image status=%d body=%s", status, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/images/generations")
+
+	status, body = doJSONPost(t, baseURL+"/v1/audio/speech", nil, map[string]any{
+		"model": smokeSpeechModel,
+		"input": smokeTerm,
+		"voice": "nova",
+	})
+	if status != http.StatusOK || string(body) != "ID3MOCKAUDIO" {
+		stop()
+		t.Fatalf("OpenAI Speech status=%d body=%q", status, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/tts")
+
+	status, body = doJSONPost(t, baseURL+"/v1/videos/generations", nil, map[string]any{
+		"model":  smokeVideoModel,
+		"prompt": smokeTerm,
+	})
+	if status != http.StatusOK || !strings.Contains(string(body), "vid_mock_1") {
+		stop()
+		t.Fatalf("OpenAI Video status=%d body=%s", status, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/videos/generations")
+
+	// 7. Unselected model passthrough
+	status, body = doJSONPost(t, baseURL+"/v1/messages", claudeHeaders, map[string]any{
+		"model":      smokeUnselectedModel,
+		"max_tokens": 128,
+		"messages":   []map[string]any{{"role": "user", "content": smokeTerm}},
+	})
 	if status != http.StatusOK {
 		stop()
 		t.Fatalf("unselected model status=%d body=%s", status, body)
 	}
-	reqs = upstream.Requests()
-	if len(reqs) != 3 {
+	reqCount++
+	reqs := upstream.Requests()
+	if len(reqs) != reqCount || !strings.Contains(reqs[len(reqs)-1].Raw, smokeTerm) {
 		stop()
-		t.Fatalf("expected 3 upstream requests, got %d", len(reqs))
-	}
-	if raw, _ := json.Marshal(reqs[2].Body); !strings.Contains(string(raw), smokeTerm) {
-		stop()
-		t.Fatalf("expected unselected model to pass through unmasked, got %s", raw)
+		t.Fatalf("expected unselected model passthrough unmasked, got %+v", reqs[len(reqs)-1])
 	}
 	stop()
 
-	// Phase 2: block_terms rejects JSON & SSE without upstream calls
+	// Phase 2: block_terms rejects across protocols without upstream calls
 	writeHostConfig(t, configPath, workDir, upstream.server.URL, port, true)
 	stop = startHost(t, hostBin, workDir, configPath, baseURL)
 	defer stop()
 
 	before := len(upstream.Requests())
-	for _, stream := range []bool{false, true} {
-		status, body = callMessages(t, baseURL, smokeModel, smokeBlockedTerm, stream)
+	blockRequests := []struct {
+		url     string
+		headers map[string]string
+		body    map[string]any
+	}{
+		{
+			url:     baseURL + "/v1/messages",
+			headers: claudeHeaders,
+			body:    map[string]any{"model": smokeClaudeModel, "max_tokens": 64, "messages": []map[string]any{{"role": "user", "content": smokeBlockedTerm}}},
+		},
+		{
+			url:  baseURL + "/v1/chat/completions",
+			body: map[string]any{"model": smokeOpenAIModel, "stream": true, "messages": []map[string]any{{"role": "user", "content": smokeBlockedTerm}}},
+		},
+		{
+			url:  baseURL + "/v1/responses",
+			body: map[string]any{"model": smokeCodexModel, "stream": true, "input": smokeBlockedTerm},
+		},
+		{
+			url:  baseURL + "/v1beta/models/" + smokeGeminiModel + ":generateContent",
+			body: map[string]any{"contents": []map[string]any{{"role": "user", "parts": []map[string]any{{"text": smokeBlockedTerm}}}}},
+		},
+	}
+	for _, br := range blockRequests {
+		status, body = doJSONPost(t, br.url, br.headers, br.body)
 		if status != http.StatusBadRequest || !strings.Contains(string(body), "request blocked by redaction policy") {
-			t.Fatalf("expected 400 blocked error (stream=%t), got status=%d body=%s", stream, status, body)
+			t.Fatalf("expected 400 blocked error on %s, got status=%d body=%s", br.url, status, body)
 		}
 		if got := len(upstream.Requests()); got != before {
-			t.Fatalf("expected zero upstream calls when blocked, got %d -> %d", before, got)
+			t.Fatalf("expected zero upstream calls when blocked on %s, got %d -> %d", br.url, before, got)
 		}
 	}
 }
