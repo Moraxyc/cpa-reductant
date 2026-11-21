@@ -216,6 +216,9 @@ jobs:
     needs: [check-upstream, check-nixpkgs-smoke]
     if: always() && needs.check-upstream.result == 'success'
     runs-on: ubuntu-latest
+    env:
+      APP_ID: ${{ vars.APP_CLIENT_ID || vars.APP_ID || secrets.APP_CLIENT_ID || secrets.APP_ID }}
+      HAS_APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY != '' }}
     steps:
       - name: Download upstream summary
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -223,9 +226,18 @@ jobs:
           name: upstream-summary
           path: .watch
 
+      - name: Create GitHub App token
+        id: app-token
+        if: ${{ env.APP_ID != '' && env.HAS_APP_PRIVATE_KEY == 'true' }}
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3
+        with:
+          app-id: ${{ env.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-issues: write
+
       - name: Create, update, or close tracking issue
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           GH_REPO: ${{ github.repository }}
           UPSTREAM_NEEDS_ACTION: ${{ needs.check-upstream.outputs.needs_action }}
           SMOKE_RESULT: ${{ needs.check-nixpkgs-smoke.result }}
