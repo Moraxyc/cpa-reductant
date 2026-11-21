@@ -107,4 +107,43 @@ CPA_BIN=/path/to/cliproxyapi go test -v ./test/...
 ## CI 与发布流程
 
 - **CI（`.github/workflows/ci.yml`）**：在 `main` 分支与 PR 上运行 `nix flake check` 以及 Linux/Windows 的 portable 交叉编译。
+- **Upstream Watch（`.github/workflows/upstream-watch.yml`）**：每周一、周四定时（或手动 `workflow_dispatch`）检查 `yetone/magpie` 与 `router-for-me/CLIProxyAPI` 新版本、试应用 `patches/magpie/*.patch`，并用最新 `nixpkgs` 的 `cliproxyapi` 试跑 `nix flake check`；发现需要适配时自动创建/更新带 `upstream-sync` 标签的跟踪 Issue，全部对齐后自动关闭。
 - **Release（`.github/workflows/release.yml`）**：推送 `v*` 标签（需与根目录 `VERSION` 文件一致）时触发，分别通过 Nix（Linux/Windows amd64 & arm64）与 macOS runner（darwin amd64 & arm64）构建 6 个平台产物，打包为 `cpa-reductant_<version>_<os>_<arch>.zip` 并生成 `checksums.txt` 发布到 GitHub Releases。
+
+## 上游适配与升级流程
+
+收到 `upstream-sync` Issue 提醒后，按以下对应清单升级并验证即可：
+
+### 升级 Magpie（`yetone/magpie`）
+
+1. **更新 Flake 输入**：将 `flake.nix` 中 `inputs.magpie.url` 的 tag 更新为目标版本，然后刷新锁文件：
+   ```sh
+   nix flake lock --update-input magpie
+   ```
+2. **验证与刷新补丁**：运行 `bash scripts/prepare.sh`（需先清理旧 `.cache/magpie` 或直接覆盖）：
+   - 若 `patches/magpie/*.patch` 出现冲突，在临时克隆的对应 tag 目录中手动调整并重新生成 `git diff` 覆盖对应 `.patch` 文件；
+   - 核对上游 `internal/redact`（`Options`、`Categories`）与 `internal/pii/guard`（`PinnedFiles` / 模型 revision）是否有新增导出需求，并在 `internal/config/config.go`、`internal/engine/` 中同步接入。
+3. **更新 `vendorHash` 与验证**：若 `go.mod` / `go.sum` 有变化，更新 `nix/package.nix` 中的 `vendorHash`，再运行：
+   ```sh
+   nix flake check --print-build-logs
+   ```
+
+### 升级 CPA（`router-for-me/CLIProxyAPI`）
+
+1. **准备本地 Magpie 替换目录**（`go.mod` 依赖 `./.cache/magpie`）：
+   ```sh
+   bash scripts/prepare.sh
+   ```
+2. **升级 Go 依赖**：
+   ```sh
+   go get github.com/router-for-me/CLIProxyAPI/v8@<目标tag>
+   go mod tidy
+   ```
+3. **核对协议与 ABI 适配点**：
+   - 核对上游 `sdk/translator` 与 `internal/constant` 是否新增或重命名协议，同步更新 `internal/config/config.go` 的 `supportedProtocols` 及 `internal/adapter/cpa.go`；
+   - 核对 `sdk/pluginabi`、`sdk/pluginapi` 与 `sdk/cliproxy/executor` 是否有字段/方法或 `RequestPathMetadataKey` 变更；
+   - 如 `nixpkgs` 已同步新版 `cliproxyapi`，顺手执行 `nix flake lock --update-input nixpkgs`。
+4. **更新 `vendorHash` 与验证**：同步更新 `nix/package.nix` 中的 `vendorHash`，运行完整检查：
+   ```sh
+   nix flake check --print-build-logs
+   ```

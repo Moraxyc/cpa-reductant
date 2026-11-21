@@ -1,0 +1,307 @@
+name: Upstream Watch
+
+on:
+  schedule:
+    - cron: '0 2 * * 1,4'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-upstream:
+    name: Check Magpie & CPA Upstreams
+    runs-on: ubuntu-latest
+    outputs:
+      needs_action: ${{ steps.check.outputs.needs_action }}
+      magpie_current: ${{ steps.check.outputs.magpie_current }}
+      magpie_latest: ${{ steps.check.outputs.magpie_latest }}
+      magpie_outdated: ${{ steps.check.outputs.magpie_outdated }}
+      magpie_patch_status: ${{ steps.check.outputs.magpie_patch_status }}
+      cpa_current: ${{ steps.check.outputs.cpa_current }}
+      cpa_latest: ${{ steps.check.outputs.cpa_latest }}
+      cpa_outdated: ${{ steps.check.outputs.cpa_outdated }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Check Magpie and CLIProxyAPI upstreams
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p .watch
+
+          # --- 1. Magpie ---
+          magpie_current=$(jq -er '.nodes.magpie.original.ref // .nodes.magpie.locked.rev' flake.lock)
+          magpie_latest=$(
+            gh api repos/yetone/magpie/releases/latest --jq '.tag_name' 2>/dev/null ||
+              gh api 'repos/yetone/magpie/tags?per_page=1' --jq '.[0].name'
+          )
+          magpie_outdated=false
+          magpie_patch_status="ok"
+          magpie_changed_files=""
+          magpie_patch_detail=""
+
+          if [[ "$magpie_latest" != "$magpie_current" ]]; then
+            magpie_outdated=true
+            work=$(mktemp -d)
+            trap 'rm -rf "$work"' EXIT
+            mkdir -p "$work/magpie"
+            curl -fsSL --retry 2 "https://codeload.github.com/yetone/magpie/tar.gz/${magpie_latest}" |
+              tar -xz --strip-components=1 -C "$work/magpie"
+
+            patch_errors=()
+            for patch in patches/magpie/*.patch; do
+              [[ -e "$patch" ]] || continue
+              if ! git -C "$work/magpie" apply --check "$PWD/$patch" >/dev/null 2>&1; then
+                magpie_patch_status="conflict"
+                patch_errors+=("$(basename "$patch")")
+              fi
+            done
+            if [[ ${#patch_errors[@]} -gt 0 ]]; then
+              magpie_patch_detail=$(printf '%s, ' "${patch_errors[@]}")
+              magpie_patch_detail=${magpie_patch_detail%, }
+            fi
+
+            magpie_changed_files=$(
+              gh api "repos/yetone/magpie/compare/${magpie_current}...${magpie_latest}" \
+                --jq '[.files[]?.filename | select(startswith("internal/redact") or startswith("internal/pii") or . == "go.mod")] | .[:20][]' \
+                2>/dev/null || echo "(compare unavailable)"
+            )
+          fi
+
+          # --- 2. CLIProxyAPI ---
+          cpa_current=$(awk '/github\.com\/router-for-me\/CLIProxyAPI\/v8[[:space:]]/ { print $2; exit }' go.mod)
+          cpa_latest=$(
+            gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq '.tag_name' 2>/dev/null || true
+          )
+          if [[ -z "$cpa_latest" || ! "$cpa_latest" =~ ^v8\. ]]; then
+            cpa_latest=$(
+              gh api 'repos/router-for-me/CLIProxyAPI/tags?per_page=30' \
+                --jq '[.[] | select(.name | test("^v8\\."))][0].name // empty'
+            )
+          fi
+          if [[ -z "$cpa_latest" ]]; then
+            cpa_latest="$cpa_current"
+          fi
+
+          cpa_outdated=false
+          cpa_changed_files=""
+          if [[ "$cpa_latest" != "$cpa_current" ]]; then
+            cpa_outdated=true
+            cpa_changed_files=$(
+              gh api "repos/router-for-me/CLIProxyAPI/compare/${cpa_current}...${cpa_latest}" \
+                --jq '[.files[]?.filename | select(startswith("sdk/pluginabi") or startswith("sdk/pluginapi") or startswith("sdk/translator") or startswith("sdk/cliproxy/executor") or startswith("internal/constant") or . == "go.mod")] | .[:25][]' \
+                2>/dev/null || echo "(compare unavailable)"
+            )
+          fi
+
+          needs_action=false
+          if [[ "$magpie_outdated" == "true" || "$cpa_outdated" == "true" ]]; then
+            needs_action=true
+          fi
+
+          {
+            echo "### 1. Magpie (\`yetone/magpie\`)"
+            echo "- 当前锁定：\`$magpie_current\`"
+            echo "- 上游最新：\`$magpie_latest\`"
+            if [[ "$magpie_outdated" == "true" ]]; then
+              echo "- 状态：⚠️ 有新版本（[Compare](https://github.com/yetone/magpie/compare/${magpie_current}...${magpie_latest})）"
+              if [[ "$magpie_patch_status" == "ok" ]]; then
+                echo "- 补丁试应用（\`patches/magpie/*.patch\`）：✅ 可直接 apply"
+              else
+                echo "- 补丁试应用（\`patches/magpie/*.patch\`）：❌ 存在冲突（\`$magpie_patch_detail\`）"
+              fi
+              if [[ -n "$magpie_changed_files" ]]; then
+                echo "- 关键目录变更："
+                while IFS= read -r line; do
+                  [[ -n "$line" ]] && echo "  - \`$line\`"
+                done <<< "$magpie_changed_files"
+              fi
+            else
+              echo "- 状态：✅ 已对齐"
+            fi
+            echo ""
+            echo "### 2. CLIProxyAPI (\`router-for-me/CLIProxyAPI\`)"
+            echo "- 当前锁定（\`go.mod\`）：\`$cpa_current\`"
+            echo "- 上游最新：\`$cpa_latest\`"
+            if [[ "$cpa_outdated" == "true" ]]; then
+              echo "- 状态：⚠️ 有新版本（[Compare](https://github.com/router-for-me/CLIProxyAPI/compare/${cpa_current}...${cpa_latest})）"
+              if [[ -n "$cpa_changed_files" ]]; then
+                echo "- ABI / 协议关键路径变更："
+                while IFS= read -r line; do
+                  [[ -n "$line" ]] && echo "  - \`$line\`"
+                done <<< "$cpa_changed_files"
+              fi
+            else
+              echo "- 状态：✅ 已对齐"
+            fi
+          } > .watch/upstream.md
+
+          {
+            echo "needs_action=$needs_action"
+            echo "magpie_current=$magpie_current"
+            echo "magpie_latest=$magpie_latest"
+            echo "magpie_outdated=$magpie_outdated"
+            echo "magpie_patch_status=$magpie_patch_status"
+            echo "cpa_current=$cpa_current"
+            echo "cpa_latest=$cpa_latest"
+            echo "cpa_outdated=$cpa_outdated"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload upstream summary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: upstream-summary
+          path: .watch/upstream.md
+          if-no-files-found: error
+
+  check-nixpkgs-smoke:
+    name: Smoke Test vs Latest Nixpkgs
+    runs-on: ubuntu-latest
+    outputs:
+      cpa_before: ${{ steps.eval.outputs.cpa_before }}
+      cpa_after: ${{ steps.eval.outputs.cpa_after }}
+    env:
+      ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT || secrets.ATTIC_ENDPOINT }}
+      ATTIC_CACHE: ${{ vars.ATTIC_CACHE || secrets.ATTIC_CACHE }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Reclaim disk space with Nothing but Nix
+        uses: wimpysworld/nothing-but-nix@b2574ec1cf1462bee0a34de0fb6ff11ad3c43cb2 # v12
+        with:
+          hatchet-protocol: cleave
+
+      - name: Install Nix
+        uses: NixOS/nix-installer-action@62c1943b776c509394b550f3f983adc14e9212d6 # v1
+        with:
+          extra-conf: |
+            build-dir = /nix/build
+
+      - name: Setup Attic cache (read-only)
+        if: ${{ env.ATTIC_ENDPOINT != '' && env.ATTIC_CACHE != '' }}
+        uses: ryanccn/attic-action@dc99f5eb1d5c0495aa26f7b56337b30011fa153e # v0
+        with:
+          endpoint: ${{ env.ATTIC_ENDPOINT }}
+          cache: ${{ env.ATTIC_CACHE }}
+          token: ${{ secrets.ATTIC_TOKEN }}
+          inputs-from: .
+          skip-push: true
+
+      - name: Update nixpkgs input & inspect cliproxyapi version
+        id: eval
+        run: |
+          set -euo pipefail
+          cpa_before=$(nix eval --raw --impure --accept-flake-config --expr 'let f = builtins.getFlake (toString ./.); p = import f.inputs.nixpkgs { system = "x86_64-linux"; }; in p.cliproxyapi.version' 2>/dev/null || echo "unknown")
+          nix flake update nixpkgs --accept-flake-config
+          cpa_after=$(nix eval --raw --impure --accept-flake-config --expr 'let f = builtins.getFlake (toString ./.); p = import f.inputs.nixpkgs { system = "x86_64-linux"; }; in p.cliproxyapi.version' 2>/dev/null || echo "unknown")
+          echo "cpa_before=$cpa_before" >> "$GITHUB_OUTPUT"
+          echo "cpa_after=$cpa_after" >> "$GITHUB_OUTPUT"
+
+      - name: Run Nix flake checks against latest nixpkgs
+        run: nix flake check --accept-flake-config --print-build-logs
+
+  report:
+    name: Update Tracking Issue
+    needs: [check-upstream, check-nixpkgs-smoke]
+    if: always() && needs.check-upstream.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download upstream summary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: upstream-summary
+          path: .watch
+
+      - name: Create, update, or close tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          UPSTREAM_NEEDS_ACTION: ${{ needs.check-upstream.outputs.needs_action }}
+          SMOKE_RESULT: ${{ needs.check-nixpkgs-smoke.result }}
+          NIXPKGS_CPA_BEFORE: ${{ needs.check-nixpkgs-smoke.outputs.cpa_before }}
+          NIXPKGS_CPA_AFTER: ${{ needs.check-nixpkgs-smoke.outputs.cpa_after }}
+        run: |
+          set -euo pipefail
+
+          ISSUE_TITLE="[Upstream Sync] Magpie / CLIProxyAPI 适配跟踪"
+          LABEL_NAME="upstream-sync"
+
+          smoke_failed=false
+          if [[ "$SMOKE_RESULT" == "failure" ]]; then
+            smoke_failed=true
+          fi
+
+          needs_action=false
+          if [[ "$UPSTREAM_NEEDS_ACTION" == "true" || "$smoke_failed" == "true" ]]; then
+            needs_action=true
+          fi
+
+          {
+            echo "以下为定时巡检结果，用于跟踪上游 \`yetone/magpie\` 与 \`router-for-me/CLIProxyAPI\` 的适配需求。"
+            echo ""
+            cat .watch/upstream.md
+            echo ""
+            echo "### 3. Nixpkgs 冒烟验证（\`nixos-unstable\`）"
+            echo "- 锁定 \`cliproxyapi\` 版本：\`${NIXPKGS_CPA_BEFORE:-unknown}\`"
+            echo "- 最新 \`nixpkgs\` 中 \`cliproxyapi\` 版本：\`${NIXPKGS_CPA_AFTER:-unknown}\`"
+            if [[ "$SMOKE_RESULT" == "success" ]]; then
+              echo "- \`nix flake check\`：✅ 通过"
+            elif [[ "$SMOKE_RESULT" == "failure" ]]; then
+              echo "- \`nix flake check\`：❌ 失败（请查看 [Upstream Watch Actions](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/upstream-watch.yml)）"
+            else
+              echo "- \`nix flake check\`：⚠️ 状态 \`$SMOKE_RESULT\`"
+            fi
+            echo ""
+            echo "### 适配 Checklist"
+            echo "- 完整升级步骤见 \`docs/DEVELOPMENT.md\` 的「上游适配与升级流程」章节。"
+            echo "- 全部对齐后，下次巡检会自动关闭本 Issue（也可在合并修复后手动关闭）。"
+          } > .watch/issue_body.md
+
+          gh label create "$LABEL_NAME" \
+            --color "fbca04" \
+            --description "Upstream Magpie / CLIProxyAPI compatibility tracking" \
+            --force >/dev/null 2>&1 || true
+
+          existing_json=$(
+            gh issue list --state open --label "$LABEL_NAME" --json number,title,body \
+              --jq '[.[] | select(.title == "'"$ISSUE_TITLE"'")][0] // empty'
+          )
+
+          if [[ "$needs_action" == "true" ]]; then
+            if [[ -z "$existing_json" ]]; then
+              gh issue create \
+                --title "$ISSUE_TITLE" \
+                --label "$LABEL_NAME" \
+                --body-file .watch/issue_body.md
+            else
+              issue_number=$(jq -er '.number' <<< "$existing_json")
+              existing_body=$(jq -r '.body' <<< "$existing_json")
+              new_body=$(cat .watch/issue_body.md)
+              if [[ "$existing_body" != "$new_body" ]]; then
+                gh issue edit "$issue_number" --body-file .watch/issue_body.md
+                gh issue comment "$issue_number" \
+                  --body "检测到上游版本或验证状态发生变化，已更新本 Issue 清单（[Run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})）。"
+              else
+                echo "Tracking issue #$issue_number is already up to date."
+              fi
+            fi
+          else
+            if [[ "$SMOKE_RESULT" == "success" && -n "$existing_json" ]]; then
+              issue_number=$(jq -er '.number' <<< "$existing_json")
+              gh issue close "$issue_number" \
+                --comment "Magpie、CLIProxyAPI 与最新 nixpkgs smoke 检查均已对齐并通过，自动关闭本跟踪 Issue。"
+            else
+              echo "No action needed (smoke result: $SMOKE_RESULT)."
+            fi
+          fi
