@@ -23,22 +23,22 @@ jobs:
       ATTIC_CACHE: ${{ vars.ATTIC_CACHE || secrets.ATTIC_CACHE }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Reclaim disk space with Nothing but Nix
-        uses: wimpysworld/nothing-but-nix@v12
+        uses: wimpysworld/nothing-but-nix@b2574ec1cf1462bee0a34de0fb6ff11ad3c43cb2 # v12
         with:
           hatchet-protocol: cleave
 
       - name: Install Nix
-        uses: NixOS/nix-installer-action@v1
+        uses: NixOS/nix-installer-action@62c1943b776c509394b550f3f983adc14e9212d6 # v1
         with:
           extra-conf: |
             build-dir = /nix/build
 
       - name: Setup Attic cache
         if: ${{ env.ATTIC_ENDPOINT != '' && env.ATTIC_CACHE != '' }}
-        uses: ryanccn/attic-action@v0
+        uses: ryanccn/attic-action@dc99f5eb1d5c0495aa26f7b56337b30011fa153e # v0
         with:
           endpoint: ${{ env.ATTIC_ENDPOINT }}
           cache: ${{ env.ATTIC_CACHE }}
@@ -58,7 +58,7 @@ jobs:
           done
 
       - name: Upload portable artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: cpa-reductant-portable
           path: dist/
