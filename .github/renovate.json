@@ -1,0 +1,15 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>Moraxyc/renovate-config",
+    ":semanticCommitTypeAll(chore)"
+  ],
+  "packageRules": [
+    {
+      "description": "Keep patched 0.x magpie separate and manual",
+      "matchPackageNames": ["magpie"],
+      "groupName": null,
+      "automerge": false
+    }
+  ]
+}
