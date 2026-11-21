@@ -18,6 +18,9 @@ jobs:
   linux:
     name: Nix Checks & Portable Cross Build
     runs-on: ubuntu-latest
+    env:
+      ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT || secrets.ATTIC_ENDPOINT }}
+      ATTIC_CACHE: ${{ vars.ATTIC_CACHE || secrets.ATTIC_CACHE }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -34,11 +37,11 @@ jobs:
             build-dir = /nix/build
 
       - name: Setup Attic cache
-        if: ${{ (vars.ATTIC_ENDPOINT || secrets.ATTIC_ENDPOINT) != '' && (vars.ATTIC_CACHE || secrets.ATTIC_CACHE) != '' }}
+        if: ${{ env.ATTIC_ENDPOINT != '' && env.ATTIC_CACHE != '' }}
         uses: ryanccn/attic-action@v0
         with:
-          endpoint: ${{ vars.ATTIC_ENDPOINT || secrets.ATTIC_ENDPOINT }}
-          cache: ${{ vars.ATTIC_CACHE || secrets.ATTIC_CACHE }}
+          endpoint: ${{ env.ATTIC_ENDPOINT }}
+          cache: ${{ env.ATTIC_CACHE }}
           token: ${{ secrets.ATTIC_TOKEN }}
           inputs-from: .
           skip-push: ${{ github.event_name == 'pull_request' || secrets.ATTIC_TOKEN == '' }}
