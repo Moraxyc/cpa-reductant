@@ -2,13 +2,19 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -257,6 +263,330 @@ func TestGuardLoadSyntheticONNXEndToEnd(t *testing.T) {
 	}
 	spans := m.Find("Hello Alice Smith from Beijing")
 	_ = spans // Synthetic zero weights produce low/uniform logits; verifying Load+Find runs end-to-end without error.
+}
+
+func TestDiskCachePersistenceAcrossRestarts(t *testing.T) {
+	dir := writeMarkerModelDir(t)
+	cfg := &config.Config{
+		Model: config.ModelConfig{
+			Enabled:  true,
+			Dir:      dir,
+			MinScore: 0.75,
+		},
+	}
+
+	eng1 := New(cfg)
+	var calls1 atomic.Int32
+	eng1.model.loader = func(string) (spanFinder, error) {
+		return fakeSpanFinder{fn: func(text string) []guard.Span {
+			calls1.Add(1)
+			if idx := strings.Index(text, "Alice Smith"); idx >= 0 {
+				return []guard.Span{{Start: idx, End: idx + len("Alice Smith"), Label: "private_person", Score: 0.91}}
+			}
+			return nil
+		}}, nil
+	}
+	req := []byte(`{"messages":[{"role":"user","content":"Notify Alice Smith right away."}]}`)
+	masked1, err := eng1.MaskJSON("openai", req)
+	if err != nil || strings.Contains(string(masked1), "Alice Smith") {
+		t.Fatalf("eng1 MaskJSON failed: err=%v out=%s", err, masked1)
+	}
+	if calls1.Load() != 1 {
+		t.Fatalf("expected 1 model call in eng1, got %d", calls1.Load())
+	}
+	eng1.Close()
+
+	cacheFile := diskCachePath(dir)
+	if _, err := os.Stat(cacheFile); err != nil {
+		t.Fatalf("expected disk cache file %s to exist after Close: %v", cacheFile, err)
+	}
+
+	// Second Engine on same dir should answer from disk cache without running Find.
+	eng2 := New(cfg)
+	defer eng2.Close()
+	var calls2 atomic.Int32
+	eng2.model.loader = func(string) (spanFinder, error) {
+		return fakeSpanFinder{fn: func(string) []guard.Span {
+			calls2.Add(1)
+			return nil
+		}}, nil
+	}
+	masked2, err := eng2.MaskJSON("openai", req)
+	if err != nil || strings.Contains(string(masked2), "Alice Smith") {
+		t.Fatalf("eng2 MaskJSON failed: err=%v out=%s", err, masked2)
+	}
+	if calls2.Load() != 0 {
+		t.Fatalf("expected 0 model calls on warm disk cache, got %d", calls2.Load())
+	}
+	st := eng2.ModelStatus()
+	if st.CacheHits == 0 || st.CacheEntries == 0 {
+		t.Fatalf("expected non-zero cache stats, got %+v", st)
+	}
+
+	// Corrupt cache file must be ignored safely rather than breaking startup.
+	if err := os.WriteFile(cacheFile, []byte("corrupt-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eng3 := New(cfg)
+	defer eng3.Close()
+	eng3.model.loader = func(string) (spanFinder, error) {
+		return fakeSpanFinder{fn: func(text string) []guard.Span {
+			if idx := strings.Index(text, "Alice Smith"); idx >= 0 {
+				return []guard.Span{{Start: idx, End: idx + len("Alice Smith"), Label: "private_person", Score: 0.91}}
+			}
+			return nil
+		}}, nil
+	}
+	masked3, err := eng3.MaskJSON("openai", req)
+	if err != nil || strings.Contains(string(masked3), "Alice Smith") {
+		t.Fatalf("eng3 should recover from corrupt cache, err=%v out=%s", err, masked3)
+	}
+}
+
+func TestBacklogOrderingCapAndStrictBehindBreaker(t *testing.T) {
+	dir := writeMarkerModelDir(t)
+	eng := New(&config.Config{
+		Model: config.ModelConfig{
+			Enabled: true,
+			Dir:     dir,
+			Strict:  false,
+			WaitMS:  5000,
+		},
+	})
+	defer eng.Close()
+
+	var seen []string
+	var mu sync.Mutex
+	eng.model.loader = func(string) (spanFinder, error) {
+		return fakeSpanFinder{fn: func(text string) []guard.Span {
+			mu.Lock()
+			seen = append(seen, text)
+			mu.Unlock()
+			var spans []guard.Span
+			if idx := strings.Index(text, "Maria Garcia"); idx >= 0 {
+				spans = append(spans, guard.Span{Start: idx, End: idx + len("Maria Garcia"), Label: "private_person", Score: 0.95})
+			}
+			return spans
+		}}, nil
+	}
+
+	// Pre-mark 3 distinct 4KB+ old messages as already sent unread (backlog) by calling with an already-expired context.
+	oldA := "OldHistoryA " + strings.Repeat("alpha ", 800)
+	oldB := "OldHistoryB " + strings.Repeat("beta ", 800)
+	oldC := "OldHistoryC " + strings.Repeat("gamma ", 800)
+	expiredCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	_, _ = eng.model.Find(expiredCtx, eng.Config().Model, []string{oldA, oldB, oldC})
+
+	mu.Lock()
+	seen = nil
+	mu.Unlock()
+
+	// Next turn adds one fresh message at the end. Expect the fresh message to run FIRST,
+	// and at most 1 backlog chunk (~4KB) to be scanned in non-strict mode.
+	reqBody, _ := json.Marshal(map[string]any{
+		"messages": []map[string]any{
+			{"role": "user", "content": oldA},
+			{"role": "assistant", "content": oldB},
+			{"role": "user", "content": oldC},
+			{"role": "user", "content": "Please tell Maria Garcia about the rollout."},
+		},
+	})
+	masked, err := eng.MaskJSON("openai", reqBody)
+	if err != nil {
+		t.Fatalf("MaskJSON: %v", err)
+	}
+	if strings.Contains(string(masked), "Maria Garcia") {
+		t.Fatalf("expected Maria Garcia to be masked ahead of backlog, got %s", masked)
+	}
+	mu.Lock()
+	scanned := slices.Clone(seen)
+	mu.Unlock()
+	if len(scanned) == 0 || !strings.Contains(scanned[0], "Maria Garcia") {
+		t.Fatalf("expected fresh message to be analyzed first, got order: %v", scanned)
+	}
+	// Fresh message + at most 2 backlog pieces (<=1 before cap is reached, depending on chunk boundary <=4KB).
+	if len(scanned) > 3 {
+		t.Fatalf("expected backlog cap to limit old chunks scanned per request, got %d pieces", len(scanned))
+	}
+
+	// Verify strict behind circuit breaker triggers on new-text deadline exceeded and clears on full completion.
+	strictCfg := config.ModelConfig{Enabled: true, Dir: dir, Strict: true}
+	eng.model.Configure(strictCfg)
+	if got := eng.model.effectiveWait(strictCfg); got != config.DefaultModelStrictWaitMS*time.Millisecond {
+		t.Fatalf("initial strict wait = %v, want 15s", got)
+	}
+	shortCtx, cancelShort := context.WithDeadline(context.Background(), time.Now().Add(-time.Millisecond))
+	defer cancelShort()
+	_, _ = eng.model.Find(shortCtx, strictCfg, []string{"Completely unseen strict prompt"})
+	if !eng.ModelStatus().Behind {
+		t.Fatal("expected Behind=true after strict timeout with unread new text")
+	}
+	if got := eng.model.effectiveWait(strictCfg); got != config.DefaultModelWaitMS*time.Millisecond {
+		t.Fatalf("behind strict wait = %v, want 2s", got)
+	}
+	if _, err := eng.model.Find(context.Background(), strictCfg, []string{"Completely unseen strict prompt"}); err != nil {
+		t.Fatalf("strict complete Find: %v", err)
+	}
+	if eng.ModelStatus().Behind {
+		t.Fatal("expected Behind=false after strict request completed all new text")
+	}
+}
+
+func TestTurnQueueShortestFirst(t *testing.T) {
+	dir := writeMarkerModelDir(t)
+	eng := New(&config.Config{
+		Model: config.ModelConfig{Enabled: true, Dir: dir, WaitMS: 5000},
+	})
+	defer eng.Close()
+
+	// Replace turn channel with capacity 1 to deterministically observe queue ordering.
+	eng.model.turn = make(chan struct{}, 1)
+	eng.model.turn <- struct{}{} // occupy the single slot
+
+	var order []string
+	var mu sync.Mutex
+	eng.model.loader = func(string) (spanFinder, error) {
+		return fakeSpanFinder{fn: func(text string) []guard.Span {
+			mu.Lock()
+			order = append(order, text[:min(5, len(text))])
+			mu.Unlock()
+			return nil
+		}}, nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = eng.model.Find(context.Background(), eng.Config().Model, []string{"LARGE:" + strings.Repeat("x", 3500)})
+	}()
+	// Wait until LARGE waiter is registered.
+	deadline := time.Now().Add(time.Second)
+	for eng.ModelStatus().Waiting < 1 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	go func() {
+		defer wg.Done()
+		_, _ = eng.model.Find(context.Background(), eng.Config().Model, []string{"SMALL"})
+	}()
+	for eng.ModelStatus().Waiting < 2 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	<-eng.model.turn // release slot
+	wg.Wait()
+
+	if len(order) != 2 || order[0] != "SMALL" || order[1] != "LARGE" {
+		t.Fatalf("expected shortest request SMALL before LARGE, got %v", order)
+	}
+}
+
+func TestAutoDownloadResumeAndMirrorFallback(t *testing.T) {
+	f1 := []byte("onnx-graph-bytes-1234567890")
+	f2 := []byte("tokenizer-json-bytes-abcdef")
+	shaHex := func(b []byte) string {
+		s := sha256.Sum256(b)
+		return hex.EncodeToString(s[:])
+	}
+
+	var primaryHits atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryHits.Add(1)
+		http.Error(w, "upstream unavailable", http.StatusBadGateway)
+	}))
+	defer primary.Close()
+
+	var mirrorRequests atomic.Int32
+	var corruptOnce atomic.Bool
+	corruptOnce.Store(true)
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := mirrorRequests.Add(1)
+		var data []byte
+		switch {
+		case strings.HasSuffix(r.URL.Path, "model_int8.onnx"):
+			data = f1
+		case strings.HasSuffix(r.URL.Path, "tokenizer.json"):
+			data = f2
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		// Simulate partial transfer on first request, then Range resume on retry.
+		if n == 1 && r.Header.Get("Range") == "" {
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(data[:10])
+			return
+		}
+		if rng := r.Header.Get("Range"); strings.HasPrefix(rng, "bytes=") {
+			start, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(rng, "bytes="), "-"))
+			if start < len(data) {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(data)-1, len(data)))
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write(data[start:])
+				return
+			}
+		}
+		// Force one checksum mismatch on tokenizer.json to verify .part cleanup and retry.
+		if strings.HasSuffix(r.URL.Path, "tokenizer.json") && corruptOnce.Swap(false) {
+			corrupted := append([]byte(nil), data...)
+			corrupted[0] ^= 0xff
+			_, _ = w.Write(corrupted)
+			return
+		}
+		_, _ = w.Write(data)
+	}))
+	defer mirror.Close()
+
+	dir := t.TempDir()
+	vdir := versionedModelDir(dir)
+	if err := os.MkdirAll(vdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldRevDir := filepath.Join(dir, "000000000000")
+	if err := os.MkdirAll(oldRevDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-seed truncated .part for f1 inside versioned dir to exercise Range resume directly.
+	if err := os.WriteFile(filepath.Join(vdir, "model_int8.onnx.part"), f1[:10], 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dl := newModelDownloader()
+	dl.files = []guard.PinnedFile{
+		{"int8/model_int8.onnx", int64(len(f1)), shaHex(f1)},
+		{"int8/tokenizer.json", int64(len(f2)), shaHex(f2)},
+	}
+	dl.urlsFor = func(mirrorURL string, f guard.PinnedFile) []string {
+		return []string{primary.URL + "/" + f.Path, mirrorURL + "/" + f.Path}
+	}
+
+	// First pass: primary fails, mirror serves f1 via Range 206, then f2 with bad SHA -> error & .part cleared.
+	if err := dl.install(context.Background(), dir, mirror.URL); err == nil {
+		t.Fatal("expected sha256 mismatch error on first tokenizer download")
+	}
+	if _, err := os.Stat(filepath.Join(vdir, "tokenizer.json.part")); !os.IsNotExist(err) {
+		t.Fatalf("expected corrupted .part to be removed, stat err=%v", err)
+	}
+	// f1 should already be verified & promoted.
+	if got, err := os.ReadFile(filepath.Join(vdir, "model_int8.onnx")); err != nil || string(got) != string(f1) {
+		t.Fatalf("expected model_int8.onnx resumed & verified, got=%q err=%v", got, err)
+	}
+
+	// Second pass: f1 skipped (verified), f2 succeeds from mirror, old revision directory cleaned up.
+	if err := dl.install(context.Background(), dir, mirror.URL); err != nil {
+		t.Fatalf("second install pass failed: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(vdir, "tokenizer.json")); err != nil || string(got) != string(f2) {
+		t.Fatalf("expected tokenizer.json verified, got=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(oldRevDir); !os.IsNotExist(err) {
+		t.Fatalf("expected old revision dir %s to be cleaned up, stat err=%v", oldRevDir, err)
+	}
+	if primaryHits.Load() == 0 {
+		t.Fatal("expected primary server to be tried before mirror fallback")
+	}
 }
 
 func BenchmarkGuardRealBERTForward4KB(b *testing.B) {

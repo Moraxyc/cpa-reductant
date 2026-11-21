@@ -86,9 +86,14 @@ model:
   dir: /opt/models/guard/
   min_score: 0.65
   wait_ms: 4500
+  auto_download: true
+  mirror: https://hf-mirror.com
 `))
 	if err != nil {
 		t.Fatalf("parse explicit model config: %v", err)
+	}
+	if !explicit.Model.AutoDownload || explicit.Model.Mirror != "https://hf-mirror.com" {
+		t.Fatalf("unexpected download settings: %+v", explicit.Model)
 	}
 	if explicit.Model.EffectiveDir() != "/opt/models/guard" {
 		t.Fatalf("dir = %q, want /opt/models/guard", explicit.Model.EffectiveDir())
@@ -105,6 +110,8 @@ model:
 		"model:\n  min_score: 0.4\n",
 		"model:\n  min_score: 1.0\n",
 		"model:\n  wait_ms: -1\n",
+		"model:\n  mirror: not-a-url\n",
+		"model:\n  mirror: ftp://example.com\n",
 	} {
 		if _, err := Parse([]byte(bad)); err == nil {
 			t.Fatalf("expected error for %q", bad)

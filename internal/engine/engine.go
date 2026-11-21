@@ -52,6 +52,13 @@ func (e *Engine) Config() *config.Config {
 	return e.cfg.Load()
 }
 
+func (e *Engine) ModelStatus() ModelStatus {
+	if e == nil || e.model == nil {
+		return ModelStatus{}
+	}
+	return e.model.Status()
+}
+
 func (e *Engine) MaskJSON(route string, body []byte) ([]byte, error) {
 	return e.MaskJSONContext(context.Background(), route, body)
 }

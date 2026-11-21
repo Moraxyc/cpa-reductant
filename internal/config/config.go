@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -53,12 +54,14 @@ var supportedProtocols = []string{
 }
 
 type ModelConfig struct {
-	Enabled  bool    `yaml:"enabled"`
-	Name     string  `yaml:"name"`
-	Dir      string  `yaml:"dir"`
-	MinScore float64 `yaml:"min_score"`
-	Strict   bool    `yaml:"strict"`
-	WaitMS   int     `yaml:"wait_ms"`
+	Enabled      bool    `yaml:"enabled"`
+	Name         string  `yaml:"name"`
+	Dir          string  `yaml:"dir"`
+	MinScore     float64 `yaml:"min_score"`
+	Strict       bool    `yaml:"strict"`
+	WaitMS       int     `yaml:"wait_ms"`
+	AutoDownload bool    `yaml:"auto_download"`
+	Mirror       string  `yaml:"mirror"`
 }
 
 func (m ModelConfig) EffectiveName() string {
@@ -109,6 +112,12 @@ func (m ModelConfig) Validate() error {
 	}
 	if m.WaitMS < 0 {
 		return fmt.Errorf("model.wait_ms must be >= 0, got %d", m.WaitMS)
+	}
+	if mirror := strings.TrimSpace(m.Mirror); mirror != "" {
+		u, err := url.Parse(mirror)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("model.mirror must be a valid http/https URL, got %q", m.Mirror)
+		}
 	}
 	return nil
 }
@@ -191,7 +200,7 @@ func Metadata() pluginapi.Metadata {
 			{Name: "protocols", Type: pluginapi.ConfigFieldTypeArray, Description: "Exact protocol formats (empty: all supported CPA formats)"},
 			{Name: "words", Type: pluginapi.ConfigFieldTypeArray, Description: "Additional literal terms to protect"},
 			{Name: "block_terms", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Reject instead of masking configured terms"},
-			{Name: "model", Type: pluginapi.ConfigFieldTypeObject, Description: "Local PII detection model configuration (enabled, name, dir, min_score, strict, wait_ms)"},
+			{Name: "model", Type: pluginapi.ConfigFieldTypeObject, Description: "Local PII detection model configuration (enabled, name, dir, min_score, strict, wait_ms, auto_download, mirror)"},
 		},
 	}
 }

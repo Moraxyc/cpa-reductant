@@ -6,12 +6,14 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -25,14 +27,37 @@ var ErrModelUnavailable = errors.New("local redaction model unavailable")
 const (
 	guardChunkSize = 4 << 10 // 4 KB per piece, matching Magpie's guardChunk
 	pieceOverlap   = 1 << 10 // 1 KB overlap across adjacent pieces
+	backlogCap     = guardChunkSize
+	sentMax        = 50000
 	landmarkLen    = 48
 	minSpread      = 8
 	cacheCap       = 20000
 	handBack       = 50 * time.Millisecond
+	behindAge      = time.Minute
 )
 
 type spanFinder interface {
 	Find(text string) []guard.Span
+}
+
+// ModelStatus exposes runtime observability for the local PII model.
+type ModelStatus struct {
+	Enabled         bool   `json:"enabled"`
+	Name            string `json:"name"`
+	Dir             string `json:"dir"`
+	Installed       bool   `json:"installed"`
+	Loaded          bool   `json:"loaded"`
+	Downloading     bool   `json:"downloading,omitempty"`
+	DownloadDone    int64  `json:"download_done,omitempty"`
+	DownloadTotal   int64  `json:"download_total,omitempty"`
+	DownloadError   string `json:"download_error,omitempty"`
+	CacheEntries    int    `json:"cache_entries"`
+	CacheHits       int64  `json:"cache_hits"`
+	CacheMisses     int64  `json:"cache_misses"`
+	PartialTimeouts int64  `json:"partial_timeouts"`
+	Behind          bool   `json:"behind,omitempty"`
+	Waiting         int32  `json:"waiting"`
+	LastError       string `json:"last_error,omitempty"`
 }
 
 // guardLabels maps AstrLink Guard BIO labels into the label namespace expected
@@ -68,9 +93,21 @@ type modelRunner struct {
 	fails     int
 	retryAt   time.Time
 
-	turn     chan struct{}
-	inflight map[[32]byte]chan struct{}
-	cache    *textLRU
+	turn       chan struct{}
+	queue      turnQueue
+	waiting    atomic.Int32
+	inflight   map[[32]byte]chan struct{}
+	cache      *textLRU
+	disk       diskCache
+	sent       sentSet
+	downloader *modelDownloader
+
+	behindAt      atomic.Int64
+	partialLogged atomic.Int64
+
+	cacheHits       atomic.Int64
+	cacheMisses     atomic.Int64
+	partialTimeouts atomic.Int64
 }
 
 func newModelRunner(cfg config.ModelConfig) *modelRunner {
@@ -78,49 +115,162 @@ func newModelRunner(cfg config.ModelConfig) *modelRunner {
 	if cores < 1 {
 		cores = 1
 	}
-	return &modelRunner{
+	r := &modelRunner{
 		cfg: cfg,
 		loader: func(dir string) (spanFinder, error) {
 			return guard.Load(dir)
 		},
-		turn:     make(chan struct{}, cores),
-		inflight: make(map[[32]byte]chan struct{}),
-		cache:    newTextLRU(cacheCap),
+		turn:       make(chan struct{}, cores),
+		inflight:   make(map[[32]byte]chan struct{}),
+		cache:      newTextLRU(cacheCap),
+		downloader: newModelDownloader(),
 	}
+	if cfg.Enabled && cfg.AutoDownload {
+		r.maybeDownload(cfg)
+	}
+	return r
 }
 
 func (r *modelRunner) Configure(cfg config.ModelConfig) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	prevDir := r.cfg.EffectiveDir()
+	prevMirror := r.cfg.Mirror
 	nextDir := cfg.EffectiveDir()
-	if !cfg.Enabled || prevDir != nextDir {
+	dirChanged := prevDir != nextDir
+	if !cfg.Enabled || dirChanged {
 		r.loaded = nil
 		r.loadedDir = ""
 		r.lastErr = nil
 		r.fails = 0
 		r.retryAt = time.Time{}
-	}
-	if prevDir != nextDir {
-		r.cache.clear()
+		r.behindAt.Store(0)
 	}
 	r.cfg = cfg
+	r.mu.Unlock()
+
+	if !cfg.Enabled || dirChanged || prevMirror != cfg.Mirror {
+		r.downloader.Reset()
+	}
+	if dirChanged {
+		r.disk.flush(prevDir, r.cache)
+		r.disk.reset()
+		r.cache.clear()
+	} else if !cfg.Enabled && prevDir != "" {
+		r.disk.flush(prevDir, r.cache)
+	}
+	if cfg.Enabled && cfg.AutoDownload {
+		r.maybeDownload(cfg)
+	}
 }
 
 func (r *modelRunner) Close() {
+	r.downloader.Cancel()
+
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	dir := r.cfg.EffectiveDir()
 	r.loaded = nil
 	r.loadedDir = ""
 	r.lastErr = nil
 	r.fails = 0
 	r.retryAt = time.Time{}
+	r.behindAt.Store(0)
+	r.mu.Unlock()
+
+	r.disk.flush(dir, r.cache)
+}
+
+func (r *modelRunner) Status() ModelStatus {
+	r.mu.Lock()
+	cfg := r.cfg
+	dir := cfg.EffectiveDir()
+	loaded := r.loaded != nil && r.loadedDir == dir
+	var lastErr string
+	if r.lastErr != nil {
+		lastErr = r.lastErr.Error()
+	}
+	r.mu.Unlock()
+
+	dlActive, dlDone, dlTotal, dlErr := r.downloader.status()
+	behind := false
+	if t := r.behindAt.Load(); t != 0 && time.Since(time.Unix(0, t)) < behindAge {
+		behind = true
+	}
+	return ModelStatus{
+		Enabled:         cfg.Enabled,
+		Name:            cfg.EffectiveName(),
+		Dir:             dir,
+		Installed:       modelInstalled(dir),
+		Loaded:          loaded,
+		Downloading:     dlActive,
+		DownloadDone:    dlDone,
+		DownloadTotal:   dlTotal,
+		DownloadError:   dlErr,
+		CacheEntries:    r.cache.len(),
+		CacheHits:       r.cacheHits.Load(),
+		CacheMisses:     r.cacheMisses.Load(),
+		PartialTimeouts: r.partialTimeouts.Load(),
+		Behind:          behind,
+		Waiting:         r.waiting.Load(),
+		LastError:       lastErr,
+	}
+}
+
+func (r *modelRunner) maybeDownload(cfg config.ModelConfig) {
+	if !cfg.Enabled || !cfg.AutoDownload || r.downloader == nil {
+		return
+	}
+	dir := cfg.EffectiveDir()
+	if dir == "" || modelInstalled(dir) {
+		return
+	}
+	r.downloader.EnsureAsync(dir, cfg.Mirror, func() {
+		r.mu.Lock()
+		if r.cfg.Enabled && r.cfg.EffectiveDir() == dir {
+			r.lastErr = nil
+			r.fails = 0
+			r.retryAt = time.Time{}
+		}
+		r.mu.Unlock()
+	})
 }
 
 func modelInstalled(dir string) bool {
+	_, ok := resolveModelDir(dir)
+	return ok
+}
+
+// resolveModelDir locates the directory containing the model weights: first
+// checking the pinned revision subdirectory (<dir>/<rev[:12]>, matching
+// Magpie's layout and ensuring exact pinned byte sizes), then falling back to
+// flat files directly inside <dir> for manual placement.
+func resolveModelDir(dir string) (string, bool) {
+	if dir == "" {
+		return "", false
+	}
+	vdir := versionedModelDir(dir)
+	if hasPinnedFiles(vdir) {
+		return vdir, true
+	}
+	if hasFlatFiles(dir) {
+		return dir, true
+	}
+	return "", false
+}
+
+func hasPinnedFiles(dir string) bool {
 	if dir == "" {
 		return false
 	}
+	for _, f := range guard.PinnedFiles {
+		fi, err := os.Stat(filepath.Join(dir, filepath.Base(f.Path)))
+		if err != nil || fi.IsDir() || fi.Size() != f.Size {
+			return false
+		}
+	}
+	return true
+}
+
+func hasFlatFiles(dir string) bool {
 	for _, rel := range guard.Files {
 		fi, err := os.Stat(filepath.Join(dir, filepath.Base(rel)))
 		if err != nil || fi.IsDir() || fi.Size() == 0 {
@@ -138,7 +288,18 @@ func retryBackoff(fails int) time.Duration {
 	return min(d, 10*time.Minute)
 }
 
-func (r *modelRunner) ensureModel(dir string) (spanFinder, error) {
+func (r *modelRunner) effectiveWait(cfg config.ModelConfig) time.Duration {
+	wait := cfg.EffectiveWait()
+	if cfg.Strict && cfg.WaitMS == 0 {
+		if t := r.behindAt.Load(); t != 0 && time.Since(time.Unix(0, t)) < behindAge {
+			return min(wait, config.DefaultModelWaitMS*time.Millisecond)
+		}
+	}
+	return wait
+}
+
+func (r *modelRunner) ensureModel(cfg config.ModelConfig) (spanFinder, error) {
+	dir := cfg.EffectiveDir()
 	r.mu.Lock()
 	if r.loaded != nil && r.loadedDir == dir {
 		m := r.loaded
@@ -153,11 +314,15 @@ func (r *modelRunner) ensureModel(dir string) (spanFinder, error) {
 	loader := r.loader
 	r.mu.Unlock()
 
-	if !modelInstalled(dir) {
+	loadDir, ok := resolveModelDir(dir)
+	if !ok {
+		if cfg.AutoDownload {
+			r.maybeDownload(cfg)
+		}
 		return nil, fmt.Errorf("%w: model files not found in %q", ErrModelUnavailable, dir)
 	}
 
-	m, err := loadSafe(loader, dir)
+	m, err := loadSafe(loader, loadDir)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -167,7 +332,6 @@ func (r *modelRunner) ensureModel(dir string) (spanFinder, error) {
 		r.retryAt = time.Now().Add(retryBackoff(r.fails))
 		return nil, r.lastErr
 	}
-	// Re-check whether configuration changed while loading.
 	if !r.cfg.Enabled || r.cfg.EffectiveDir() != dir {
 		return nil, ErrModelUnavailable
 	}
@@ -199,19 +363,26 @@ func findSafe(m spanFinder, text string) (spans []guard.Span, err error) {
 	return m.Find(text), nil
 }
 
-// Find analyzes texts up to cfg.EffectiveWait() under ctx. On timeout, cached
-// and already-finished pieces are returned so rule masking handles the rest,
-// while an in-flight piece finishes into the cache for subsequent turns.
+// Find analyzes texts up to effectiveWait(cfg) under ctx. New pieces are
+// prioritized ahead of previously-sent backlog pieces; non-strict requests
+// cap backlog work per request while strict requests return once all new
+// pieces finish. Timeout falls back to partial hits plus rule masking.
 func (r *modelRunner) Find(ctx context.Context, cfg config.ModelConfig, texts []string) ([][]redact.Found, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
+	dir := cfg.EffectiveDir()
+	r.disk.loadOnce(dir, r.cache)
+
 	out, miss := r.known(texts)
 	if len(miss) == 0 {
+		r.cacheHits.Add(int64(len(texts)))
 		return filterByScore(out, cfg.EffectiveMinScore()), nil
 	}
+	r.cacheHits.Add(int64(len(texts) - len(miss)))
+	r.cacheMisses.Add(int64(len(miss)))
 
-	m, err := r.ensureModel(cfg.EffectiveDir())
+	m, err := r.ensureModel(cfg)
 	if err != nil {
 		if cfg.Strict {
 			return nil, err
@@ -219,22 +390,52 @@ func (r *modelRunner) Find(ctx context.Context, cfg config.ModelConfig, texts []
 		return filterByScore(out, cfg.EffectiveMinScore()), nil
 	}
 
-	wait := cfg.EffectiveWait()
+	units, backlog := r.missingUnits(texts, miss)
+	if len(units) == 0 {
+		return filterByScore(out, cfg.EffectiveMinScore()), nil
+	}
+
+	wait := r.effectiveWait(cfg)
 	var cancel context.CancelFunc
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		ctx, cancel = context.WithTimeout(ctx, wait)
 		defer cancel()
 	}
 
-	// Process newest texts and newest pieces first: chat histories append new
-	// turns at the end, while older turns are most likely unchanged/cached.
-	units := r.missingUnits(texts, miss)
-	for _, piece := range units {
+	// Calculate remaining byte weights for shortest-job-first turn scheduling.
+	leftBytes := make([]int, len(units)+1)
+	for i := len(units) - 1; i >= 0; i-- {
+		leftBytes[i] = leftBytes[i+1] + len(units[i].text)
+	}
+
+	backlogRead := 0
+	newTotal := 0
+	for _, u := range units {
+		if !u.backlog {
+			newTotal++
+		}
+	}
+	newDone := 0
+	timedOut := false
+
+	for idx, u := range units {
+		if u.backlog {
+			if cfg.Strict && newDone == newTotal {
+				// All brand-new pieces finished; don't hold the request for old backlog.
+				break
+			}
+			if !cfg.Strict && backlogRead >= backlogCap {
+				break
+			}
+		}
 		if ctx.Err() != nil {
+			timedOut = true
 			break
 		}
-		if err := r.analyzePiece(ctx, m, piece); err != nil {
+		didRun, err := r.analyzePiece(ctx, m, u.text, leftBytes[idx])
+		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				timedOut = true
 				break
 			}
 			if cfg.Strict {
@@ -242,16 +443,43 @@ func (r *modelRunner) Find(ctx context.Context, cfg config.ModelConfig, texts []
 			}
 			break
 		}
+		if didRun {
+			r.disk.scheduleSave(dir, r.cache)
+		}
+		if u.backlog {
+			backlogRead += len(u.text)
+		} else {
+			newDone++
+		}
+	}
+
+	if timedOut {
+		r.partialTimeouts.Add(1)
+		if cfg.Strict && newDone < newTotal && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			r.behindAt.Store(time.Now().UnixNano())
+		}
+		r.notePartial(newTotal-newDone, len(units), wait, ctx.Err())
+	} else if cfg.Strict && newDone == newTotal && len(backlog) >= 0 {
+		r.behindAt.Store(0)
 	}
 
 	out, _ = r.known(texts)
 	return filterByScore(out, cfg.EffectiveMinScore()), nil
 }
 
-func (r *modelRunner) analyzePiece(ctx context.Context, m spanFinder, piece string) error {
+func (r *modelRunner) notePartial(missingNew, totalUnits int, wait time.Duration, err error) {
+	now := time.Now().Unix()
+	if prev := r.partialLogged.Load(); prev != 0 && now-prev < 60 || !r.partialLogged.CompareAndSwap(prev, now) {
+		return
+	}
+	log.Printf("cpa-reductant: local model timed out after %s (%d/%d new pieces remaining, %v); degraded to partial+rules",
+		wait, max(0, missingNew), totalUnits, err)
+}
+
+func (r *modelRunner) analyzePiece(ctx context.Context, m spanFinder, piece string, priorityLeftBytes int) (bool, error) {
 	k := sha256.Sum256([]byte(piece))
 	if _, ok := r.cache.get(k); ok {
-		return nil
+		return false, nil
 	}
 
 	// Deduplicate concurrent analyses of identical chunks.
@@ -260,9 +488,9 @@ func (r *modelRunner) analyzePiece(ctx context.Context, m spanFinder, piece stri
 		r.mu.Unlock()
 		select {
 		case <-ch:
-			return nil
+			return false, nil
 		case <-ctx.Done():
-			return ctx.Err()
+			return false, ctx.Err()
 		}
 	}
 	ch := make(chan struct{})
@@ -281,11 +509,9 @@ func (r *modelRunner) analyzePiece(ctx context.Context, m spanFinder, piece stri
 		close(ch)
 	}
 
-	select {
-	case r.turn <- struct{}{}:
-	case <-ctx.Done():
+	if !r.takeTurn(ctx, priorityLeftBytes) {
 		releaseInflight()
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 
 	type pieceResult struct {
@@ -318,15 +544,40 @@ func (r *modelRunner) analyzePiece(ctx context.Context, m spanFinder, piece stri
 
 	select {
 	case res := <-done:
-		return res.err
+		return res.err == nil, res.err
 	case <-ctx.Done():
 		t := time.NewTimer(handBack)
 		defer t.Stop()
 		select {
 		case res := <-done:
-			return res.err
+			return res.err == nil, res.err
 		case <-t.C:
-			return ctx.Err()
+			return false, ctx.Err()
+		}
+	}
+}
+
+func (r *modelRunner) takeTurn(ctx context.Context, left int) bool {
+	r.waiting.Add(1)
+	defer r.waiting.Add(-1)
+	w := r.queue.add(left)
+	defer r.queue.remove(w)
+	for {
+		next, changed := r.queue.next(w)
+		if !next {
+			select {
+			case <-changed:
+				continue
+			case <-ctx.Done():
+				return false
+			}
+		}
+		select {
+		case r.turn <- struct{}{}:
+			return true
+		case <-changed:
+		case <-ctx.Done():
+			return false
 		}
 	}
 }
@@ -376,8 +627,14 @@ func (r *modelRunner) known(texts []string) (out [][]redact.Found, miss []int) {
 	return out, miss
 }
 
-func (r *modelRunner) missingUnits(texts []string, miss []int) []string {
-	var out []string
+type missingUnit struct {
+	text    string
+	backlog bool
+}
+
+func (r *modelRunner) missingUnits(texts []string, miss []int) ([]missingUnit, map[[32]byte]bool) {
+	var raw []string
+	var hashes [][32]byte
 	seen := make(map[[32]byte]bool)
 	for j := len(miss) - 1; j >= 0; j-- {
 		t := texts[miss[j]]
@@ -393,10 +650,100 @@ func (r *modelRunner) missingUnits(texts []string, miss []int) []string {
 			if fs, ok := r.cache.get(k); ok && spansFit(fs, sub) {
 				continue
 			}
-			out = append(out, sub)
+			raw = append(raw, sub)
+			hashes = append(hashes, k)
 		}
 	}
-	return out
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	backlog := r.sent.mark(hashes)
+	freshUnits := make([]missingUnit, 0, len(raw))
+	backlogUnits := make([]missingUnit, 0, len(raw))
+	for i, s := range raw {
+		if backlog[hashes[i]] {
+			backlogUnits = append(backlogUnits, missingUnit{text: s, backlog: true})
+		} else {
+			freshUnits = append(freshUnits, missingUnit{text: s, backlog: false})
+		}
+	}
+	return append(freshUnits, backlogUnits...), backlog
+}
+
+// sentSet tracks hashes of chunks already sent in previous turns using a
+// two-generation rotating map so old unread history is deprioritized.
+type sentSet struct {
+	mu        sync.Mutex
+	cur, prev map[[32]byte]bool
+}
+
+func (s *sentSet) mark(ks [][32]byte) map[[32]byte]bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	was := make(map[[32]byte]bool)
+	for _, k := range ks {
+		if s.cur[k] || s.prev[k] {
+			was[k] = true
+		}
+	}
+	for _, k := range ks {
+		if s.cur == nil || len(s.cur) >= sentMax {
+			s.prev, s.cur = s.cur, make(map[[32]byte]bool)
+		}
+		s.cur[k] = true
+	}
+	return was
+}
+
+// turnQueue orders waiting requests by shortest remaining uncached bytes first.
+type turnQueue struct {
+	mu      sync.Mutex
+	seq     uint64
+	waiters map[*turnWaiter]bool
+	changed chan struct{}
+}
+
+type turnWaiter struct {
+	left int
+	seq  uint64
+}
+
+func (q *turnQueue) add(left int) *turnWaiter {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.seq++
+	w := &turnWaiter{left: left, seq: q.seq}
+	if q.waiters == nil {
+		q.waiters = make(map[*turnWaiter]bool)
+	}
+	q.waiters[w] = true
+	q.notifyLocked()
+	return w
+}
+
+func (q *turnQueue) remove(w *turnWaiter) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.waiters, w)
+	q.notifyLocked()
+}
+
+func (q *turnQueue) notifyLocked() {
+	if q.changed != nil {
+		close(q.changed)
+	}
+	q.changed = make(chan struct{})
+}
+
+func (q *turnQueue) next(w *turnWaiter) (bool, <-chan struct{}) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for other := range q.waiters {
+		if other.left < w.left || (other.left == w.left && other.seq < w.seq) {
+			return false, q.changed
+		}
+	}
+	return true, q.changed
 }
 
 func filterByScore(all [][]redact.Found, minScore float64) [][]redact.Found {
@@ -580,6 +927,12 @@ func newTextLRU(maxEntries int) *textLRU {
 	}
 }
 
+func (c *textLRU) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ll.Len()
+}
+
 func (c *textLRU) get(k [32]byte) ([]redact.Found, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -605,6 +958,36 @@ func (c *textLRU) put(k [32]byte, fs []redact.Found) {
 		c.ll.Remove(e)
 		delete(c.m, e.Value.(*lruEntry).k)
 	}
+}
+
+func (c *textLRU) seed(entries []lruEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, en := range entries {
+		if _, ok := c.m[en.k]; ok {
+			continue
+		}
+		c.m[en.k] = c.ll.PushFront(&lruEntry{k: en.k, fs: en.fs})
+		for c.ll.Len() > c.max {
+			e := c.ll.Back()
+			c.ll.Remove(e)
+			delete(c.m, e.Value.(*lruEntry).k)
+		}
+	}
+}
+
+func (c *textLRU) snapshotOldestFirst() []lruEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]lruEntry, 0, c.ll.Len())
+	for e := c.ll.Back(); e != nil; e = e.Prev() {
+		en := e.Value.(*lruEntry)
+		out = append(out, lruEntry{
+			k:  en.k,
+			fs: slices.Clone(en.fs),
+		})
+	}
+	return out
 }
 
 func (c *textLRU) clear() {
