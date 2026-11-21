@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync/atomic"
 
 	"github.com/moraxyc/cpa-reductant/internal/config"
@@ -62,6 +64,36 @@ func (e *Engine) MaskJSON(route string, body []byte) ([]byte, error) {
 
 func (e *Engine) RestoreJSON(body []byte) []byte {
 	return redact.RestoreJSON(body)
+}
+
+func (e *Engine) RestoreResponse(protocol, contentType string, body []byte) []byte {
+	if len(body) == 0 || IsBinaryContentType(contentType) {
+		return body
+	}
+	if config.NormalizeProtocol(protocol) == config.ProtocolOpenAISpeech && !json.Valid(body) {
+		return body
+	}
+	return redact.RestoreJSON(body)
+}
+
+func IsBinaryContentType(ct string) bool {
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	for _, prefix := range []string{
+		"audio/",
+		"image/",
+		"video/",
+		"application/octet-stream",
+		"application/pdf",
+		"application/zip",
+	} {
+		if strings.HasPrefix(ct, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) NewStreamWriter(w http.ResponseWriter) *redact.Writer {
