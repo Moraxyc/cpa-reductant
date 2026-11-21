@@ -1,0 +1,28 @@
+diff --git a/pkg/guard/guard.go b/pkg/guard/guard.go
+new file mode 100644
+index 0000000..8f2d4c1
+--- /dev/null
++++ b/pkg/guard/guard.go
+@@ -0,0 +1,22 @@
++package guard
++
++import "github.com/yetone/magpie/internal/pii/guard"
++
++const (
++	MinScore = guard.MinScore
++	Floor    = guard.Floor
++)
++
++var Files = guard.Files
++
++type (
++	Model = guard.Model
++	Span  = guard.Span
++)
++
++func Load(dir string) (*Model, error) {
++	return guard.Load(dir)
++}
++
++func Cores() int { return guard.Cores() }
++

@@ -1,6 +1,7 @@
 #include "abi.h"
 
 extern int plugin_call(char *, uint8_t *, size_t, rpc_buffer *);
+extern void plugin_shutdown(void);
 
 static const host_api *host;
 
@@ -9,7 +10,9 @@ static void release_plugin(void *ptr, size_t len) {
     free(ptr);
 }
 
-static void shutdown_plugin(void) {}
+static void shutdown_plugin(void) {
+    plugin_shutdown();
+}
 
 int cliproxy_plugin_init(const host_api *api, plugin_api *plugin) {
     if (!api || api->version != 1 || !api->call || !api->release || !plugin) return 1;

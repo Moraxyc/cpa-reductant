@@ -58,6 +58,12 @@ func NewPlugin(eng *engine.Engine, host HostCaller) *Plugin {
 	}
 }
 
+func (p *Plugin) Shutdown() {
+	if p != nil && p.engine != nil {
+		p.engine.Close()
+	}
+}
+
 func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
@@ -86,7 +92,10 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 				"executor_output_formats": protocols,
 			},
 		}, nil
-	case pluginabi.MethodPluginQuiesce, pluginabi.MethodPluginShutdown:
+	case pluginabi.MethodPluginQuiesce:
+		return nil, nil
+	case pluginabi.MethodPluginShutdown:
+		p.Shutdown()
 		return nil, nil
 	case pluginabi.MethodExecutorIdentifier:
 		return map[string]string{"identifier": config.PluginID}, nil
@@ -195,6 +204,9 @@ func (p *Plugin) prepareModelRequest(request executorRequest, stream bool) (mode
 	if err != nil {
 		if errors.Is(err, engine.ErrBlocked) {
 			return modelRequest{}, pluginabi.NewError("redaction_blocked", err.Error(), http.StatusBadRequest)
+		}
+		if errors.Is(err, engine.ErrModelUnavailable) {
+			return modelRequest{}, pluginabi.NewError(pluginabi.ErrorCodeRequestScoped, err.Error(), http.StatusServiceUnavailable)
 		}
 		return modelRequest{}, err
 	}

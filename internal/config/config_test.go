@@ -55,3 +55,59 @@ protocols: [chat-completions, responses]
 		t.Fatal("expected claude to be filtered out by protocols config")
 	}
 }
+
+func TestModelConfigParseAndDefaults(t *testing.T) {
+	t.Setenv(EnvModelDir, "/tmp/env-guard-dir")
+	cfg, err := Parse([]byte(`
+model:
+  enabled: true
+  strict: true
+`))
+	if err != nil {
+		t.Fatalf("parse model config: %v", err)
+	}
+	if cfg.Model.EffectiveName() != ModelAstrLinkGuard {
+		t.Fatalf("name = %q, want %q", cfg.Model.EffectiveName(), ModelAstrLinkGuard)
+	}
+	if cfg.Model.EffectiveDir() != "/tmp/env-guard-dir" {
+		t.Fatalf("dir = %q, want /tmp/env-guard-dir", cfg.Model.EffectiveDir())
+	}
+	if cfg.Model.EffectiveMinScore() != 0.8 {
+		t.Fatalf("min_score = %v, want 0.8", cfg.Model.EffectiveMinScore())
+	}
+	if cfg.Model.EffectiveWait().Milliseconds() != DefaultModelStrictWaitMS {
+		t.Fatalf("wait = %v, want %dms", cfg.Model.EffectiveWait(), DefaultModelStrictWaitMS)
+	}
+
+	explicit, err := Parse([]byte(`
+model:
+  enabled: true
+  name: astrlink-guard
+  dir: /opt/models/guard/
+  min_score: 0.65
+  wait_ms: 4500
+`))
+	if err != nil {
+		t.Fatalf("parse explicit model config: %v", err)
+	}
+	if explicit.Model.EffectiveDir() != "/opt/models/guard" {
+		t.Fatalf("dir = %q, want /opt/models/guard", explicit.Model.EffectiveDir())
+	}
+	if explicit.Model.EffectiveMinScore() != 0.65 {
+		t.Fatalf("min_score = %v, want 0.65", explicit.Model.EffectiveMinScore())
+	}
+	if explicit.Model.EffectiveWait().Milliseconds() != 4500 {
+		t.Fatalf("wait = %v, want 4500ms", explicit.Model.EffectiveWait())
+	}
+
+	for _, bad := range []string{
+		"model:\n  name: unknown-model\n",
+		"model:\n  min_score: 0.4\n",
+		"model:\n  min_score: 1.0\n",
+		"model:\n  wait_ms: -1\n",
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Fatalf("expected error for %q", bad)
+		}
+	}
+}

@@ -52,6 +52,7 @@
                   src = inputs.magpie;
                   patches = [
                     ./patches/magpie/0001-expose-redact.patch
+                    ./patches/magpie/0002-expose-guard.patch
                   ];
                 };
               })

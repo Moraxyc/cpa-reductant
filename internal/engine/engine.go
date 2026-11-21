@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -15,14 +17,17 @@ var ErrBlocked = errors.New("request blocked by redaction policy")
 
 // Engine schedules redaction and restoration primitives exposed from Magpie.
 type Engine struct {
-	cfg atomic.Pointer[config.Config]
+	cfg   atomic.Pointer[config.Config]
+	model *modelRunner
 }
 
 func New(cfg *config.Config) *Engine {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
-	e := &Engine{}
+	e := &Engine{
+		model: newModelRunner(cfg.Model),
+	}
 	e.cfg.Store(cfg)
 	return e
 }
@@ -32,6 +37,15 @@ func (e *Engine) Update(cfg *config.Config) {
 		cfg = &config.Config{}
 	}
 	e.cfg.Store(cfg)
+	if e.model != nil {
+		e.model.Configure(cfg.Model)
+	}
+}
+
+func (e *Engine) Close() {
+	if e != nil && e.model != nil {
+		e.model.Close()
+	}
 }
 
 func (e *Engine) Config() *config.Config {
@@ -39,8 +53,13 @@ func (e *Engine) Config() *config.Config {
 }
 
 func (e *Engine) MaskJSON(route string, body []byte) ([]byte, error) {
+	return e.MaskJSONContext(context.Background(), route, body)
+}
+
+func (e *Engine) MaskJSONContext(ctx context.Context, route string, body []byte) (out []byte, err error) {
 	cfg := e.Config()
 	blocked := false
+	var modelErr error
 	options := redact.Options{
 		Secrets:  true,
 		Personal: true,
@@ -55,7 +74,28 @@ func (e *Engine) MaskJSON(route string, body []byte) ([]byte, error) {
 	if cfg.BlockTerms {
 		options.Actions = map[string]string{"TERM": redact.Block}
 	}
+	if cfg.Model.Enabled && e.model != nil {
+		options.MinScore = cfg.Model.EffectiveMinScore()
+		options.NamesByModel = cfg.Model.EffectiveName() == config.ModelAstrLinkGuard
+		options.Model = func(texts []string) [][]redact.Found {
+			found, ferr := e.model.Find(ctx, cfg.Model, texts)
+			if ferr != nil {
+				modelErr = ferr
+				return make([][]redact.Found, len(texts))
+			}
+			return found
+		}
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			out = nil
+			err = fmt.Errorf("redaction panic: %v", rec)
+		}
+	}()
 	masked, _ := redact.MaskJSON(body, options)
+	if modelErr != nil {
+		return nil, modelErr
+	}
 	if blocked {
 		return nil, ErrBlocked
 	}

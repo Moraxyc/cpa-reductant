@@ -781,3 +781,32 @@ func TestStreamExecutePropagatesInitialHostError(t *testing.T) {
 		t.Fatalf("expected 429 rate_limit error, got %#v", err)
 	}
 }
+
+func TestModelUnavailableStrictReturns503WithoutUpstream(t *testing.T) {
+	host := newFakeHost(nil)
+	p := NewPlugin(engine.New(nil), host)
+	_, err := p.Dispatch(pluginabi.MethodPluginRegister, mustJSON(t, map[string]any{
+		"config_yaml": []byte("model:\n  enabled: true\n  strict: true\n  dir: " + t.TempDir() + "\n"),
+	}))
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	_, err = p.Dispatch(pluginabi.MethodExecutorExecute, mustJSON(t, executorRequest{
+		ExecutorRequest: pluginapi.ExecutorRequest{
+			Model:           "test-model",
+			Format:          config.ProtocolOpenAI,
+			SourceFormat:    config.ProtocolOpenAI,
+			OriginalRequest: []byte(`{"model":"test-model","messages":[{"role":"user","content":"Contact Alice Smith"}]}`),
+		},
+	}))
+	abiErr, ok := err.(*pluginabi.Error)
+	if !ok || abiErr.StatusCode() != http.StatusServiceUnavailable || abiErr.Code != pluginabi.ErrorCodeRequestScoped {
+		t.Fatalf("expected 503 request_scoped error, got %#v", err)
+	}
+	if host.count() != 0 {
+		t.Fatalf("expected 0 upstream calls when strict model unavailable, got %d", host.count())
+	}
+	if _, err := p.Dispatch(pluginabi.MethodPluginShutdown, nil); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+}

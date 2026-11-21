@@ -49,6 +49,11 @@ var plugin = adapter.NewPlugin(engine.New(nil), cgoHostCaller{})
 
 func main() {}
 
+//export plugin_shutdown
+func plugin_shutdown() {
+	plugin.Shutdown()
+}
+
 //export plugin_call
 func plugin_call(method *C.char, input *C.uint8_t, length C.size_t, out *C.rpc_buffer) C.int {
 	*out = C.rpc_buffer{}
