@@ -7,9 +7,15 @@
   "packageRules": [
     {
       "description": "Keep patched 0.x magpie separate and manual",
+      "matchManagers": ["nix"],
       "matchPackageNames": ["magpie"],
       "groupName": null,
       "automerge": false
+    },
+    {
+      "description": "Disable gomod updates because go.mod relies on local .cache/magpie replace and Nix vendorHash",
+      "matchManagers": ["gomod"],
+      "enabled": false
     }
   ]
 }
