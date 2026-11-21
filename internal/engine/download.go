@@ -48,6 +48,24 @@ type modelDownloader struct {
 	files     []guard.PinnedFile
 	stallWait time.Duration
 	urlsFor   func(mirror string, f guard.PinnedFile) []string
+	logFn     func(level, msg string, fields map[string]any)
+}
+
+func (d *modelDownloader) setLogger(fn func(level, msg string, fields map[string]any)) {
+	d.mu.Lock()
+	d.logFn = fn
+	d.mu.Unlock()
+}
+
+func (d *modelDownloader) logf(level, msg string, fields map[string]any) {
+	d.mu.Lock()
+	fn := d.logFn
+	d.mu.Unlock()
+	if fn != nil {
+		fn(level, msg, fields)
+		return
+	}
+	log.Printf("cpa-reductant: %s", msg)
 }
 
 func newModelDownloader() *modelDownloader {
@@ -150,11 +168,17 @@ func (d *modelDownloader) EnsureAsync(dir, mirror string, onReady func()) {
 	d.wg.Add(1)
 	d.mu.Unlock()
 
-	log.Printf("cpa-reductant: downloading astrlink-guard (%s) into %s", guard.Rev[:12], versionedModelDir(dir))
+	d.logf("info", fmt.Sprintf("downloading astrlink-guard (%s)", guard.Rev[:12]), map[string]any{
+		"component": "model_downloader",
+		"rev":       guard.Rev[:12],
+		"dir":       versionedModelDir(dir),
+	})
 	go func() {
 		defer d.wg.Done()
 		defer cancel()
 		err := d.install(ctx, dir, mirror)
+		var logLevel, logMsg string
+		var logFields map[string]any
 		d.mu.Lock()
 		d.cancel = nil
 		if err != nil {
@@ -162,13 +186,20 @@ func (d *modelDownloader) EnsureAsync(dir, mirror string, onReady func()) {
 				d.lastErr = ""
 			} else {
 				d.lastErr = err.Error()
-				log.Printf("cpa-reductant: astrlink-guard download failed: %v", err)
+				logLevel = "warn"
+				logMsg = fmt.Sprintf("astrlink-guard download failed: %v", err)
+				logFields = map[string]any{"component": "model_downloader", "error": err.Error()}
 			}
 		} else {
 			d.lastErr = ""
-			log.Printf("cpa-reductant: astrlink-guard weights ready in %s", versionedModelDir(dir))
+			logLevel = "info"
+			logMsg = "astrlink-guard weights ready"
+			logFields = map[string]any{"component": "model_downloader", "dir": versionedModelDir(dir)}
 		}
 		d.mu.Unlock()
+		if logMsg != "" {
+			d.logf(logLevel, logMsg, logFields)
+		}
 		if err == nil && onReady != nil {
 			onReady()
 		}

@@ -38,6 +38,20 @@ type diskCache struct {
 	timer     *time.Timer
 	savingMu  sync.Mutex
 	wg        sync.WaitGroup
+	lastErr   string
+	onError   func(error)
+}
+
+func (d *diskCache) setOnError(fn func(error)) {
+	d.mu.Lock()
+	d.onError = fn
+	d.mu.Unlock()
+}
+
+func (d *diskCache) lastError() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastErr
 }
 
 func (d *diskCache) loadOnce(dir string, cache *textLRU) {
@@ -86,9 +100,24 @@ func (d *diskCache) scheduleSave(dir string, cache *textLRU) {
 		d.dirty = false
 		d.mu.Unlock()
 		if dirty {
-			_ = d.writeFile(targetDir, cache)
+			d.saveAndRecord(targetDir, cache)
 		}
 	})
+}
+
+func (d *diskCache) saveAndRecord(dir string, cache *textLRU) {
+	err := d.writeFile(dir, cache)
+	d.mu.Lock()
+	onError := d.onError
+	if err != nil {
+		d.lastErr = err.Error()
+	} else {
+		d.lastErr = ""
+	}
+	d.mu.Unlock()
+	if err != nil && onError != nil {
+		onError(err)
+	}
 }
 
 func (d *diskCache) flush(dir string, cache *textLRU) {
@@ -109,7 +138,7 @@ func (d *diskCache) flush(dir string, cache *textLRU) {
 
 	d.wg.Wait()
 	if dirty && targetDir != "" {
-		_ = d.writeFile(targetDir, cache)
+		d.saveAndRecord(targetDir, cache)
 	}
 }
 
@@ -123,6 +152,7 @@ func (d *diskCache) reset() {
 	}
 	d.loadedDir = ""
 	d.dirty = false
+	d.lastErr = ""
 	d.mu.Unlock()
 	d.wg.Wait()
 }

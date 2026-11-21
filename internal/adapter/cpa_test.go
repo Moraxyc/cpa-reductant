@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -43,7 +44,7 @@ func (f *fakeHost) Call(method string, request, reply any) error {
 	f.calls = append(f.calls, hostCall{method: method, payload: raw})
 	f.mu.Unlock()
 
-	if f.handler != nil {
+	if f.handler != nil && method != pluginabi.MethodHostLog {
 		if err := f.handler(method, raw, reply); err != nil {
 			return err
 		}
@@ -64,7 +65,25 @@ func (f *fakeHost) Call(method string, request, reply any) error {
 func (f *fakeHost) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.calls)
+	n := 0
+	for _, c := range f.calls {
+		if c.method != pluginabi.MethodHostLog {
+			n++
+		}
+	}
+	return n
+}
+
+func (f *fakeHost) logCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, c := range f.calls {
+		if c.method == pluginabi.MethodHostLog {
+			n++
+		}
+	}
+	return n
 }
 
 func mustJSON(t *testing.T, v any) []byte {
@@ -182,7 +201,10 @@ func TestBlockTermsRejectsWithoutUpstreamCall(t *testing.T) {
 		}
 	}
 	if host.count() != 0 {
-		t.Fatalf("expected 0 host calls on blocked requests, got %d", host.count())
+		t.Fatalf("expected 0 upstream host calls on blocked requests, got %d", host.count())
+	}
+	if host.logCount() != 2 {
+		t.Fatalf("expected 2 host.log calls on blocked requests, got %d", host.logCount())
 	}
 }
 
@@ -268,6 +290,10 @@ func TestStreamRestoreSplitPlaceholder(t *testing.T) {
 	got := emitted.String()
 	if !strings.Contains(got, term) || !strings.Contains(got, "message_stop") {
 		t.Fatalf("expected restored term and message_stop in stream, got:\n%s", got)
+	}
+	st := p.engine.Status()
+	if st.Stats.StreamsTotal != 1 || st.Stats.StreamsRestored != 1 || st.Stats.PlaceholdersRestored < 1 {
+		t.Fatalf("expected stream restore telemetry to record restored stream, got %+v", st.Stats)
 	}
 }
 
@@ -806,6 +832,9 @@ func TestModelUnavailableStrictReturns503WithoutUpstream(t *testing.T) {
 	if host.count() != 0 {
 		t.Fatalf("expected 0 upstream calls when strict model unavailable, got %d", host.count())
 	}
+	if host.logCount() != 1 {
+		t.Fatalf("expected 1 host.log call on strict unavailable, got %d", host.logCount())
+	}
 	if _, err := p.Dispatch(pluginabi.MethodPluginShutdown, nil); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
@@ -830,13 +859,29 @@ func TestManagementStatusAndPreview(t *testing.T) {
 		t.Fatalf("management.register: %v", err)
 	}
 	mgmtReg := routesResp.(pluginapi.ManagementRegistrationResponse)
-	if len(mgmtReg.Routes) != 2 {
-		t.Fatalf("expected 2 management routes, got %#v", mgmtReg.Routes)
+	if len(mgmtReg.Routes) != 3 || len(mgmtReg.Resources) != 0 {
+		t.Fatalf("expected 3 authenticated management routes and 0 unauthenticated resources, got routes=%#v resources=%#v", mgmtReg.Routes, mgmtReg.Resources)
+	}
+	for _, r := range mgmtReg.Routes {
+		if r.Menu != "" {
+			t.Fatalf("expected no unauthenticated Menu resource routes, got %#v", r)
+		}
 	}
 
-	// Trigger one mask so stats are non-zero.
-	if _, err := p.engine.MaskJSON("test-route", []byte(`{"text":"secret SYNTHETIC-MGMT-SECRET and mail bob@acme.io"}`)); err != nil {
-		t.Fatalf("MaskJSON: %v", err)
+	// Trigger one mask + restore so stats, dimensions, and recent events are populated.
+	masked, err := p.engine.MaskRequest(t.Context(), engine.RequestMeta{
+		Route:    "claude-sonnet-test",
+		Protocol: config.ProtocolClaude,
+		Model:    "claude-sonnet-test",
+	}, []byte(`{"text":"secret SYNTHETIC-MGMT-SECRET and mail bob@acme.io"}`))
+	if err != nil {
+		t.Fatalf("MaskRequest: %v", err)
+	}
+	if _, n := p.engine.RestoreResponseWithMeta(engine.RequestMeta{
+		Protocol: config.ProtocolClaude,
+		Model:    "claude-sonnet-test",
+	}, "application/json", masked); n != 1 {
+		t.Fatalf("expected 1 restored placeholder, got %d", n)
 	}
 
 	previewRespRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
@@ -874,8 +919,48 @@ func TestManagementStatusAndPreview(t *testing.T) {
 	if err := json.Unmarshal(statusResp.Body, &st); err != nil {
 		t.Fatalf("decode status: %v", err)
 	}
-	if st.Policy.WordsCount != 1 || st.Stats.RequestsTotal != 1 || st.Stats.HitsWarned != 1 {
+	if st.Policy.WordsCount != 1 || st.Stats.RequestsTotal != 1 || st.Stats.HitsWarned != 1 || st.Stats.PlaceholdersRestored != 1 || len(st.RecentEvents) != 2 {
 		t.Fatalf("unexpected management status: %+v", st)
+	}
+
+	// Machine status supports ?events=0 to omit event feed.
+	compactRespRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/management/cpa-reductant/status",
+		Query:  url.Values{"events": {"0"}},
+	}))
+	if err != nil {
+		t.Fatalf("management compact status: %v", err)
+	}
+	var compactSt engine.Status
+	if err := json.Unmarshal(compactRespRaw.(pluginapi.ManagementResponse).Body, &compactSt); err != nil {
+		t.Fatalf("decode compact status: %v", err)
+	}
+	if len(compactSt.RecentEvents) != 0 {
+		t.Fatalf("expected 0 events with ?events=0, got %d", len(compactSt.RecentEvents))
+	}
+
+	// Visual HTML dashboard works via ?format=html, Accept: text/html, and /ui without leaking plaintext.
+	for _, req := range []pluginapi.ManagementRequest{
+		{Method: http.MethodGet, Path: "/v0/management/cpa-reductant/status", Query: url.Values{"format": {"html"}}},
+		{Method: http.MethodGet, Path: "/v0/management/cpa-reductant/status", Headers: http.Header{"Accept": {"text/html"}}},
+		{Method: http.MethodGet, Path: "/v0/management/cpa-reductant/ui", Query: url.Values{"action": {"mask"}}},
+	} {
+		htmlRespRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, req))
+		if err != nil {
+			t.Fatalf("management HTML %s: %v", req.Path, err)
+		}
+		htmlResp := htmlRespRaw.(pluginapi.ManagementResponse)
+		if htmlResp.StatusCode != http.StatusOK || !strings.Contains(htmlResp.Headers.Get("Content-Type"), "text/html") {
+			t.Fatalf("expected 200 text/html for %s, got status=%d headers=%v", req.Path, htmlResp.StatusCode, htmlResp.Headers)
+		}
+		htmlBody := string(htmlResp.Body)
+		if !strings.Contains(htmlBody, "cpa-reductant") || !strings.Contains(htmlBody, "claude-sonnet-test") || !strings.Contains(htmlBody, "TERM") {
+			t.Fatalf("expected dashboard HTML to contain service, model, and kind metrics:\n%s", htmlBody)
+		}
+		if strings.Contains(htmlBody, "SYNTHETIC-MGMT-SECRET") || strings.Contains(htmlBody, "bob@acme.io") {
+			t.Fatalf("dashboard HTML must never leak plaintext secrets or warned emails")
+		}
 	}
 
 	badReqRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{

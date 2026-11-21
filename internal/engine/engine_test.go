@@ -163,3 +163,90 @@ func TestEngineKeyPathPersistenceAcrossRestarts(t *testing.T) {
 		t.Fatalf("expected deterministic placeholder across restarts, got %q != %q", first, second)
 	}
 }
+
+func TestEngineTelemetryRestoreEventsAndKeyPathLock(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "reductant.key")
+	secret := "sk-ant-api03-telemetrysecretvalue123456"
+	warned := "bob@acme.io"
+	eng := New(&config.Config{
+		KeyPath: keyPath,
+		Actions: map[string]string{"EMAIL": "warn"},
+	})
+	defer eng.Close()
+
+	var logs []string
+	eng.SetLogger(func(level, callbackID, msg string, fields map[string]any) {
+		logs = append(logs, fmt.Sprintf("%s:%s:%s", level, callbackID, msg))
+	})
+
+	reqBody := []byte(fmt.Sprintf(`{"messages":[{"role":"user","content":"key=%s mail=%s"}]}`, secret, warned))
+	masked, err := eng.MaskRequest(context.Background(), RequestMeta{
+		Route:          "claude-test",
+		Protocol:       config.ProtocolClaude,
+		Model:          "claude-test",
+		HostCallbackID: "cb-1",
+	}, reqBody)
+	if err != nil {
+		t.Fatalf("MaskRequest: %v", err)
+	}
+	if strings.Contains(string(masked), secret) {
+		t.Fatalf("secret should be masked: %s", masked)
+	}
+	if len(logs) == 0 || !strings.Contains(logs[0], "cb-1") {
+		t.Fatalf("expected host logger to receive warn hit with callback ID, got %v", logs)
+	}
+
+	restored, restoredCount := eng.RestoreResponseWithMeta(RequestMeta{
+		Protocol: config.ProtocolClaude,
+		Model:    "claude-test",
+	}, "application/json", masked)
+	if restoredCount != 1 || !strings.Contains(string(restored), secret) {
+		t.Fatalf("expected 1 placeholder restored with secret back, count=%d out=%s", restoredCount, restored)
+	}
+
+	eng.RecordStreamRestore(RequestMeta{
+		Protocol: config.ProtocolOpenAI,
+		Model:    "gpt-test",
+		Stream:   true,
+	}, 128, map[string]int{"{{API_KEY_abcd1234}}": 2}, 5*1e6, nil)
+
+	eng.RecordStreamRestore(RequestMeta{
+		Protocol:       config.ProtocolOpenAI,
+		Model:          "gpt-test",
+		Stream:         true,
+		HostCallbackID: "cb-2",
+	}, 64, nil, 2*1e6, errors.New("upstream EOF"))
+
+	// Changing key_path after redaction started should report key_path_error and key_path_active=false.
+	eng.Update(&config.Config{
+		KeyPath: filepath.Join(t.TempDir(), "other.key"),
+	})
+
+	st := eng.StatusWithOptions(10, "")
+	if !st.Policy.KeyPathConfigured || st.Policy.KeyPathActive || st.Policy.KeyPathError == "" {
+		t.Fatalf("expected KeyPathError after post-lock reconfigure, got %+v", st.Policy)
+	}
+	if st.Stats.ResponsesTotal != 1 || st.Stats.ResponsesRestored != 1 ||
+		st.Stats.StreamsTotal != 2 || st.Stats.StreamsRestored != 1 || st.Stats.StreamsFailed != 1 ||
+		st.Stats.PlaceholdersRestored != 3 {
+		t.Fatalf("unexpected restore stats: %+v", st.Stats)
+	}
+	if st.Stats.BytesMaskedIn == 0 || st.Stats.BytesRestoredOut == 0 || st.Stats.MaskLatency.Count != 1 || st.Stats.RestoreLatency.Count != 3 {
+		t.Fatalf("unexpected bytes/latency stats: %+v", st.Stats)
+	}
+	if st.Stats.ByProtocol[config.ProtocolClaude].PlaceholdersRestored != 1 || st.Stats.ByModel["gpt-test"].PlaceholdersRestored != 2 {
+		t.Fatalf("unexpected dimension stats: protocol=%+v model=%+v", st.Stats.ByProtocol, st.Stats.ByModel)
+	}
+	if len(st.RecentEvents) != 4 {
+		t.Fatalf("expected 4 recent events, got %d (%+v)", len(st.RecentEvents), st.RecentEvents)
+	}
+	rawStatus, _ := json.Marshal(st)
+	if strings.Contains(string(rawStatus), secret) || strings.Contains(string(rawStatus), warned) {
+		t.Fatalf("telemetry JSON must never contain raw secret or warned plaintext: %s", rawStatus)
+	}
+
+	onlyErrors := eng.StatusWithOptions(10, "error")
+	if len(onlyErrors.RecentEvents) != 1 || onlyErrors.RecentEvents[0].Action != "error" {
+		t.Fatalf("expected action=error filter to return 1 event, got %+v", onlyErrors.RecentEvents)
+	}
+}

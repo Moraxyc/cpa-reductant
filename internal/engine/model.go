@@ -42,22 +42,29 @@ type spanFinder interface {
 
 // ModelStatus exposes runtime observability for the local PII model.
 type ModelStatus struct {
-	Enabled         bool   `json:"enabled"`
-	Name            string `json:"name"`
-	Dir             string `json:"dir"`
-	Installed       bool   `json:"installed"`
-	Loaded          bool   `json:"loaded"`
-	Downloading     bool   `json:"downloading,omitempty"`
-	DownloadDone    int64  `json:"download_done,omitempty"`
-	DownloadTotal   int64  `json:"download_total,omitempty"`
-	DownloadError   string `json:"download_error,omitempty"`
-	CacheEntries    int    `json:"cache_entries"`
-	CacheHits       int64  `json:"cache_hits"`
-	CacheMisses     int64  `json:"cache_misses"`
-	PartialTimeouts int64  `json:"partial_timeouts"`
-	Behind          bool   `json:"behind,omitempty"`
-	Waiting         int32  `json:"waiting"`
-	LastError       string `json:"last_error,omitempty"`
+	Enabled         bool           `json:"enabled"`
+	Name            string         `json:"name"`
+	Dir             string         `json:"dir"`
+	ResolvedDir     string         `json:"resolved_dir,omitempty"`
+	Layout          string         `json:"layout,omitempty"`
+	Installed       bool           `json:"installed"`
+	Loaded          bool           `json:"loaded"`
+	Cores           int            `json:"cores,omitempty"`
+	Downloading     bool           `json:"downloading,omitempty"`
+	DownloadDone    int64          `json:"download_done,omitempty"`
+	DownloadTotal   int64          `json:"download_total,omitempty"`
+	DownloadError   string         `json:"download_error,omitempty"`
+	CacheEntries    int            `json:"cache_entries"`
+	CacheHits       int64          `json:"cache_hits"`
+	CacheMisses     int64          `json:"cache_misses"`
+	PartialTimeouts int64          `json:"partial_timeouts"`
+	Behind          bool           `json:"behind,omitempty"`
+	Waiting         int32          `json:"waiting"`
+	Fails           int            `json:"fails,omitempty"`
+	RetryAt         string         `json:"retry_at,omitempty"`
+	LastError       string         `json:"last_error,omitempty"`
+	DiskCacheError  string         `json:"disk_cache_error,omitempty"`
+	InferLatency    LatencySummary `json:"infer_latency_ms"`
 }
 
 // guardLabels maps AstrLink Guard BIO labels into the label namespace expected
@@ -108,6 +115,8 @@ type modelRunner struct {
 	cacheHits       atomic.Int64
 	cacheMisses     atomic.Int64
 	partialTimeouts atomic.Int64
+	inferLatency    latencyTracker
+	logFn           func(level, msg string, fields map[string]any)
 }
 
 func newModelRunner(cfg config.ModelConfig) *modelRunner {
@@ -125,10 +134,36 @@ func newModelRunner(cfg config.ModelConfig) *modelRunner {
 		cache:      newTextLRU(cacheCap),
 		downloader: newModelDownloader(),
 	}
+	r.disk.setOnError(func(err error) {
+		r.logf("warn", fmt.Sprintf("disk cache save failed: %v", err), map[string]any{
+			"component": "model_disk_cache",
+			"error":     err.Error(),
+		})
+	})
 	if cfg.Enabled && cfg.AutoDownload {
 		r.maybeDownload(cfg)
 	}
 	return r
+}
+
+func (r *modelRunner) setLogger(fn func(level, msg string, fields map[string]any)) {
+	r.mu.Lock()
+	r.logFn = fn
+	r.mu.Unlock()
+	if r.downloader != nil {
+		r.downloader.setLogger(fn)
+	}
+}
+
+func (r *modelRunner) logf(level, msg string, fields map[string]any) {
+	r.mu.Lock()
+	fn := r.logFn
+	r.mu.Unlock()
+	if fn != nil {
+		fn(level, msg, fields)
+		return
+	}
+	log.Printf("cpa-reductant: %s", msg)
 }
 
 func (r *modelRunner) Configure(cfg config.ModelConfig) {
@@ -184,10 +219,16 @@ func (r *modelRunner) Status() ModelStatus {
 	cfg := r.cfg
 	dir := cfg.EffectiveDir()
 	loaded := r.loaded != nil && r.loadedDir == dir
+	fails := r.fails
+	var retryAt string
+	if !r.retryAt.IsZero() && time.Now().Before(r.retryAt) {
+		retryAt = r.retryAt.UTC().Format(time.RFC3339)
+	}
 	var lastErr string
 	if r.lastErr != nil {
 		lastErr = r.lastErr.Error()
 	}
+	cores := cap(r.turn)
 	r.mu.Unlock()
 
 	dlActive, dlDone, dlTotal, dlErr := r.downloader.status()
@@ -195,12 +236,19 @@ func (r *modelRunner) Status() ModelStatus {
 	if t := r.behindAt.Load(); t != 0 && time.Since(time.Unix(0, t)) < behindAge {
 		behind = true
 	}
+	resolvedDir, layout, installed := resolveModelDirWithLayout(dir)
+	if !cfg.Enabled && !installed {
+		layout = "disabled"
+	}
 	return ModelStatus{
 		Enabled:         cfg.Enabled,
 		Name:            cfg.EffectiveName(),
 		Dir:             dir,
-		Installed:       modelInstalled(dir),
+		ResolvedDir:     resolvedDir,
+		Layout:          layout,
+		Installed:       installed,
 		Loaded:          loaded,
+		Cores:           cores,
 		Downloading:     dlActive,
 		DownloadDone:    dlDone,
 		DownloadTotal:   dlTotal,
@@ -211,7 +259,11 @@ func (r *modelRunner) Status() ModelStatus {
 		PartialTimeouts: r.partialTimeouts.Load(),
 		Behind:          behind,
 		Waiting:         r.waiting.Load(),
+		Fails:           fails,
+		RetryAt:         retryAt,
 		LastError:       lastErr,
+		DiskCacheError:  r.disk.lastError(),
+		InferLatency:    r.inferLatency.snapshot(),
 	}
 }
 
@@ -244,17 +296,22 @@ func modelInstalled(dir string) bool {
 // Magpie's layout and ensuring exact pinned byte sizes), then falling back to
 // flat files directly inside <dir> for manual placement.
 func resolveModelDir(dir string) (string, bool) {
+	resolved, _, ok := resolveModelDirWithLayout(dir)
+	return resolved, ok
+}
+
+func resolveModelDirWithLayout(dir string) (string, string, bool) {
 	if dir == "" {
-		return "", false
+		return "", "missing", false
 	}
 	vdir := versionedModelDir(dir)
 	if hasPinnedFiles(vdir) {
-		return vdir, true
+		return vdir, "versioned", true
 	}
 	if hasFlatFiles(dir) {
-		return dir, true
+		return dir, "flat", true
 	}
-	return "", false
+	return "", "missing", false
 }
 
 func hasPinnedFiles(dir string) bool {
@@ -417,6 +474,10 @@ func (r *modelRunner) Find(ctx context.Context, cfg config.ModelConfig, texts []
 	}
 	newDone := 0
 	timedOut := false
+	inferStart := time.Now()
+	defer func() {
+		r.inferLatency.record(time.Since(inferStart))
+	}()
 
 	for idx, u := range units {
 		if u.backlog {
@@ -472,8 +533,14 @@ func (r *modelRunner) notePartial(missingNew, totalUnits int, wait time.Duration
 	if prev := r.partialLogged.Load(); prev != 0 && now-prev < 60 || !r.partialLogged.CompareAndSwap(prev, now) {
 		return
 	}
-	log.Printf("cpa-reductant: local model timed out after %s (%d/%d new pieces remaining, %v); degraded to partial+rules",
-		wait, max(0, missingNew), totalUnits, err)
+	r.logf("warn", fmt.Sprintf("local model timed out after %s (%d/%d new pieces remaining, %v); degraded to partial+rules",
+		wait, max(0, missingNew), totalUnits, err), map[string]any{
+		"component":         "local_model",
+		"wait_ms":           wait.Milliseconds(),
+		"missing_new_units": max(0, missingNew),
+		"total_units":       totalUnits,
+		"error":             fmt.Sprint(err),
+	})
 }
 
 func (r *modelRunner) analyzePiece(ctx context.Context, m spanFinder, piece string, priorityLeftBytes int) (bool, error) {

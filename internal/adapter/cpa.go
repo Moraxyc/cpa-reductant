@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/moraxyc/cpa-reductant/internal/config"
 	"github.com/moraxyc/cpa-reductant/internal/engine"
@@ -18,6 +20,7 @@ import (
 const (
 	managementBasePath    = "/v0/management"
 	managementStatusPath  = "/cpa-reductant/status"
+	managementUIPath      = "/cpa-reductant/ui"
 	managementPreviewPath = "/cpa-reductant/preview"
 )
 
@@ -59,10 +62,26 @@ type Plugin struct {
 }
 
 func NewPlugin(eng *engine.Engine, host HostCaller) *Plugin {
-	return &Plugin{
+	p := &Plugin{
 		engine: eng,
 		host:   host,
 	}
+	if eng != nil && host != nil {
+		eng.SetLogger(func(level, callbackID, msg string, fields map[string]any) {
+			req := map[string]any{
+				"level":   level,
+				"message": msg,
+			}
+			if callbackID != "" {
+				req["host_callback_id"] = callbackID
+			}
+			if len(fields) > 0 {
+				req["fields"] = fields
+			}
+			_ = host.Call(pluginabi.MethodHostLog, req, nil)
+		})
+	}
+	return p
 }
 
 func (p *Plugin) Shutdown() {
@@ -139,15 +158,20 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 				return nil, err
 			}
 			headers := streamResponseHeaders(upstream.Headers, masked.ExitProtocol, masked.Alt)
-			go p.forwardStream(upstream.StreamID, request.StreamID, masked.ExitProtocol, masked.Alt, headers)
+			go p.forwardStream(upstream.StreamID, request.StreamID, masked.ExitProtocol, masked.Model, masked.HostCallbackID, masked.Alt, headers)
 			return map[string]any{"headers": headers}, nil
 		}
 		var reply pluginapi.HostModelExecutionResponse
 		if err := p.host.Call(pluginabi.MethodHostModelExecute, masked, &reply); err != nil {
 			return nil, err
 		}
+		restored, _ := p.engine.RestoreResponseWithMeta(engine.RequestMeta{
+			Protocol:       masked.ExitProtocol,
+			Model:          masked.Model,
+			HostCallbackID: masked.HostCallbackID,
+		}, reply.Headers.Get("Content-Type"), reply.Body)
 		return pluginapi.ExecutorResponse{
-			Payload: p.engine.RestoreResponse(masked.ExitProtocol, reply.Headers.Get("Content-Type"), reply.Body),
+			Payload: restored,
 			Headers: restoredHeaders(reply.Headers),
 		}, nil
 	case pluginabi.MethodManagementRegister:
@@ -156,7 +180,12 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 				{
 					Method:      http.MethodGet,
 					Path:        managementStatusPath,
-					Description: "Inspect cpa-reductant redaction policy, hit statistics, and local model status",
+					Description: "Inspect cpa-reductant redaction policy, telemetry, recent events, and local model status (JSON or ?format=html)",
+				},
+				{
+					Method:      http.MethodGet,
+					Path:        managementUIPath,
+					Description: "Visual observability dashboard for cpa-reductant (HTML)",
 				},
 				{
 					Method:      http.MethodPost,
@@ -189,8 +218,34 @@ func (p *Plugin) handleManagement(req pluginapi.ManagementRequest) pluginapi.Man
 	}
 	path := normalizeManagementPath(req.Path)
 	switch {
-	case method == http.MethodGet && path == managementStatusPath:
-		return jsonManagementResponse(http.StatusOK, p.engine.Status())
+	case method == http.MethodGet && (path == managementStatusPath || path == managementUIPath):
+		eventLimit := 50
+		if rawEvents := strings.TrimSpace(req.Query.Get("events")); rawEvents != "" {
+			if n, err := strconv.Atoi(rawEvents); err == nil {
+				if n < 0 {
+					n = 0
+				} else if n > 100 {
+					n = 100
+				}
+				eventLimit = n
+			}
+		}
+		actionFilter := strings.TrimSpace(req.Query.Get("action"))
+		refreshSec := 0
+		if rawRefresh := strings.TrimSpace(req.Query.Get("refresh")); rawRefresh != "" {
+			if n, err := strconv.Atoi(rawRefresh); err == nil && n > 0 {
+				refreshSec = max(n, 5)
+			}
+		}
+		st := p.engine.StatusWithOptions(eventLimit, actionFilter)
+		if path == managementUIPath || wantsHTML(req) {
+			baseURL := managementBasePath + managementUIPath
+			if path == managementStatusPath {
+				baseURL = managementBasePath + managementStatusPath + "?format=html"
+			}
+			return renderDashboardHTML(st, baseURL, actionFilter, eventLimit, refreshSec)
+		}
+		return jsonManagementResponse(http.StatusOK, st)
 	case method == http.MethodPost && path == managementPreviewPath:
 		var body struct {
 			Text string `json:"text"`
@@ -227,6 +282,17 @@ func normalizeManagementPath(raw string) string {
 		return "/"
 	}
 	return path
+}
+
+func wantsHTML(req pluginapi.ManagementRequest) bool {
+	switch strings.ToLower(strings.TrimSpace(req.Query.Get("format"))) {
+	case "html":
+		return true
+	case "json":
+		return false
+	}
+	accept := strings.ToLower(req.Headers.Get("Accept"))
+	return strings.Contains(accept, "text/html") && !strings.Contains(accept, "application/json")
 }
 
 func jsonManagementResponse(status int, payload any) pluginapi.ManagementResponse {
@@ -289,16 +355,6 @@ func (p *Plugin) prepareModelRequest(request executorRequest, stream bool) (mode
 	if !json.Valid(body) {
 		return modelRequest{}, pluginabi.NewError("invalid_json", "expected a JSON body", http.StatusBadRequest)
 	}
-	masked, err := p.engine.MaskJSON(request.Model, body)
-	if err != nil {
-		if errors.Is(err, engine.ErrBlocked) {
-			return modelRequest{}, pluginabi.NewError("redaction_blocked", err.Error(), http.StatusBadRequest)
-		}
-		if errors.Is(err, engine.ErrModelUnavailable) {
-			return modelRequest{}, pluginabi.NewError(pluginabi.ErrorCodeRequestScoped, err.Error(), http.StatusServiceUnavailable)
-		}
-		return modelRequest{}, err
-	}
 	entryProtocol := config.NormalizeProtocol(request.SourceFormat)
 	if entryProtocol == "" {
 		entryProtocol = config.NormalizeProtocol(request.Format)
@@ -309,6 +365,22 @@ func (p *Plugin) prepareModelRequest(request executorRequest, stream bool) (mode
 	exitProtocol := config.NormalizeProtocol(request.Format)
 	if exitProtocol == "" {
 		exitProtocol = entryProtocol
+	}
+	masked, err := p.engine.MaskRequest(context.Background(), engine.RequestMeta{
+		Route:          request.Model,
+		Protocol:       entryProtocol,
+		Model:          request.Model,
+		Stream:         stream,
+		HostCallbackID: request.HostCallbackID,
+	}, body)
+	if err != nil {
+		if errors.Is(err, engine.ErrBlocked) {
+			return modelRequest{}, pluginabi.NewError("redaction_blocked", err.Error(), http.StatusBadRequest)
+		}
+		if errors.Is(err, engine.ErrModelUnavailable) {
+			return modelRequest{}, pluginabi.NewError(pluginabi.ErrorCodeRequestScoped, err.Error(), http.StatusServiceUnavailable)
+		}
+		return modelRequest{}, err
 	}
 	callerScope, _ := request.Metadata[pluginapi.CallerScopeMetadataKey].(string)
 	reqPath, _ := request.Metadata[requestPathMetadataKey].(string)
@@ -329,9 +401,9 @@ func (p *Plugin) prepareModelRequest(request executorRequest, stream bool) (mode
 	}, nil
 }
 
-func (p *Plugin) forwardStream(upstreamID, outputID, exitProtocol, alt string, headers http.Header) {
+func (p *Plugin) forwardStream(upstreamID, outputID, exitProtocol, model, callbackID, alt string, headers http.Header) {
 	update := streamUpdate{StreamID: outputID}
-	if err := p.restoreStream(upstreamID, outputID, exitProtocol, alt, headers); err != nil {
+	if err := p.restoreStream(upstreamID, outputID, exitProtocol, model, callbackID, alt, headers); err != nil {
 		update.Error = err.Error()
 		var abiErr *pluginabi.Error
 		if errors.As(err, &abiErr) && abiErr != nil {
@@ -341,7 +413,8 @@ func (p *Plugin) forwardStream(upstreamID, outputID, exitProtocol, alt string, h
 	_ = p.host.Call(pluginabi.MethodHostStreamClose, update, nil)
 }
 
-func (p *Plugin) restoreStream(upstreamID, outputID, exitProtocol, alt string, headers http.Header) error {
+func (p *Plugin) restoreStream(upstreamID, outputID, exitProtocol, model, callbackID, alt string, headers http.Header) error {
+	start := time.Now()
 	stream := pluginapi.HostModelStreamCloseRequest{StreamID: upstreamID}
 	defer func() { _ = p.host.Call(pluginabi.MethodHostModelStreamClose, stream, nil) }()
 
@@ -352,6 +425,17 @@ func (p *Plugin) restoreStream(upstreamID, outputID, exitProtocol, alt string, h
 		alt:          alt,
 		contentType:  headers.Get("Content-Type"),
 	}
+	var bytesOut int
+	var streamErr error
+	defer func() {
+		p.engine.RecordStreamRestore(engine.RequestMeta{
+			Protocol:       exitProtocol,
+			Model:          model,
+			Stream:         true,
+			HostCallbackID: callbackID,
+		}, bytesOut, writer.Put(), time.Since(start), streamErr)
+	}()
+
 	for {
 		var chunk pluginapi.HostModelStreamReadResponse
 		if err := p.host.Call(
@@ -359,14 +443,17 @@ func (p *Plugin) restoreStream(upstreamID, outputID, exitProtocol, alt string, h
 			pluginapi.HostModelStreamReadRequest{StreamID: stream.StreamID},
 			&chunk,
 		); err != nil {
+			streamErr = err
 			return err
 		}
 		if chunk.Error != "" {
-			return fmt.Errorf("upstream stream: %s", chunk.Error)
+			streamErr = fmt.Errorf("upstream stream: %s", chunk.Error)
+			return streamErr
 		}
 		if len(chunk.Payload) != 0 {
 			payload := normalizer.Normalize(chunk.Payload)
 			if _, err := writer.Write(payload); err != nil {
+				streamErr = err
 				return err
 			}
 		}
@@ -374,11 +461,13 @@ func (p *Plugin) restoreStream(upstreamID, outputID, exitProtocol, alt string, h
 			writer.Finish()
 		}
 		if buffer.Len() > 0 {
+			bytesOut += buffer.Len()
 			if err := p.host.Call(
 				pluginabi.MethodHostStreamEmit,
 				streamUpdate{StreamID: outputID, Payload: buffer.Bytes()},
 				nil,
 			); err != nil {
+				streamErr = err
 				return err
 			}
 			buffer.Reset()

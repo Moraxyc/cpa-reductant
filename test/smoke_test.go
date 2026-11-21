@@ -926,9 +926,33 @@ func TestSmokeCPA(t *testing.T) {
 	}
 	mgmtBody, _ := io.ReadAll(mgmtResp.Body)
 	_ = mgmtResp.Body.Close()
-	if mgmtResp.StatusCode != http.StatusOK || !strings.Contains(string(mgmtBody), `"requests_total"`) {
+	if mgmtResp.StatusCode != http.StatusOK || !strings.Contains(string(mgmtBody), `"requests_total"`) || !strings.Contains(string(mgmtBody), `"recent_events"`) {
 		stop()
 		t.Fatalf("management status=%d body=%s", mgmtResp.StatusCode, mgmtBody)
+	}
+	uiReq, _ := http.NewRequest(http.MethodGet, baseURL+"/v0/management/cpa-reductant/ui", nil)
+	uiReq.Header.Set("Authorization", "Bearer test-management-key")
+	uiResp, err := (&http.Client{Timeout: 5 * time.Second}).Do(uiReq)
+	if err != nil {
+		stop()
+		t.Fatalf("management ui GET: %v", err)
+	}
+	uiBody, _ := io.ReadAll(uiResp.Body)
+	_ = uiResp.Body.Close()
+	if uiResp.StatusCode != http.StatusOK || !strings.Contains(uiResp.Header.Get("Content-Type"), "text/html") || strings.Contains(string(uiBody), smokeTerm) {
+		stop()
+		t.Fatalf("management ui=%d ct=%s", uiResp.StatusCode, uiResp.Header.Get("Content-Type"))
+	}
+	unauthReq, _ := http.NewRequest(http.MethodGet, baseURL+"/v0/management/cpa-reductant/ui", nil)
+	unauthResp, err := (&http.Client{Timeout: 5 * time.Second}).Do(unauthReq)
+	if err != nil {
+		stop()
+		t.Fatalf("unauth ui GET: %v", err)
+	}
+	_ = unauthResp.Body.Close()
+	if unauthResp.StatusCode != http.StatusUnauthorized {
+		stop()
+		t.Fatalf("expected 401 for unauthenticated ui access, got %d", unauthResp.StatusCode)
 	}
 	previewReq, _ := http.NewRequest(http.MethodPost, baseURL+"/v0/management/cpa-reductant/preview", strings.NewReader(`{"text":"`+smokeTerm+`"}`))
 	previewReq.Header.Set("Authorization", "Bearer test-management-key")
