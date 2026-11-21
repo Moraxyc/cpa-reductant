@@ -956,8 +956,8 @@ func TestManagementStatusAndPreview(t *testing.T) {
 		t.Fatalf("expected 200 text/html for resource portal, got status=%d headers=%v", portalResp.StatusCode, portalResp.Headers)
 	}
 	portalBody := string(portalResp.Body)
-	if !strings.Contains(portalBody, "auth-form") || !strings.Contains(portalBody, "/v0/management/cpa-reductant/status") {
-		t.Fatalf("expected login form and status API endpoint in:\n%s", portalBody)
+	if !strings.Contains(portalBody, "auth-form") || !strings.Contains(portalBody, "/v0/management/cpa-reductant/status") || !strings.Contains(portalBody, "body.embedded") {
+		t.Fatalf("expected login form, status API endpoint, and embedded layout rule in:\n%s", portalBody)
 	}
 	for _, forbidden := range []string{"claude-sonnet-test", "SYNTHETIC-MGMT-SECRET", "bob@acme.io", "TERM_"} {
 		if strings.Contains(portalBody, forbidden) {

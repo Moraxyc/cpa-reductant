@@ -542,6 +542,9 @@ var portalHTML = `<!doctype html>
 .auth-form{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
 .input{flex:1;min-width:200px;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font:13px/1.4 var(--mono)}
 .hidden{display:none!important}
+body.embedded{padding-top:88px}
+body.embedded .auth-wrap{margin-top:12px}
+@media (max-width:768px){body.embedded{padding-top:72px}}
 </style>
 </head>
 <body>
@@ -627,6 +630,13 @@ var portalHTML = `<!doctype html>
 
 <script>
 (function(){
+  try{
+    if(window.self !== window.top){
+      document.body.classList.add('embedded');
+    }
+  }catch(_){
+    document.body.classList.add('embedded');
+  }
   var KEY_STORAGE = 'cpa_reductant_mgmt_key';
   var STATUS_URL = '/v0/management/cpa-reductant/status';
   var PREVIEW_URL = '/v0/management/cpa-reductant/preview';
