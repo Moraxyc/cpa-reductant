@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -267,5 +268,516 @@ func TestStreamRestoreSplitPlaceholder(t *testing.T) {
 	got := emitted.String()
 	if !strings.Contains(got, term) || !strings.Contains(got, "message_stop") {
 		t.Fatalf("expected restored term and message_stop in stream, got:\n%s", got)
+	}
+}
+
+func TestModelRouteSupportedAndSkippedCases(t *testing.T) {
+	p := NewPlugin(engine.New(nil), newFakeHost(nil))
+	reg, err := p.Dispatch(pluginabi.MethodPluginRegister, mustJSON(t, map[string]any{
+		"config_yaml": []byte("words: [SYNTHETIC-TEST]\n"),
+	}))
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	caps := reg.(map[string]any)["capabilities"].(map[string]any)
+	inputs := caps["executor_input_formats"].([]string)
+	outputs := caps["executor_output_formats"].([]string)
+	if len(inputs) != len(config.SupportedProtocols()) || len(outputs) != len(config.SupportedProtocols()) {
+		t.Fatalf("unexpected formats: in=%v out=%v", inputs, outputs)
+	}
+
+	for _, format := range config.SupportedProtocols() {
+		resp, err := p.Dispatch(pluginabi.MethodModelRoute, mustJSON(t, routeRequest{
+			SourceFormat:   format,
+			RequestedModel: "any-model",
+			Body:           []byte(`{"model":"any-model"}`),
+		}))
+		if err != nil || !resp.(pluginapi.ModelRouteResponse).Handled {
+			t.Fatalf("expected %q to be handled, got %#v, err=%v", format, resp, err)
+		}
+	}
+
+	skipCases := []struct {
+		name string
+		req  routeRequest
+	}{
+		{
+			name: "claude count_tokens",
+			req: routeRequest{
+				SourceFormat:   config.ProtocolClaude,
+				RequestedModel: "claude-sonnet-test",
+				Body:           []byte(`{"model":"claude-sonnet-test","messages":[]}`),
+				Metadata:       map[string]any{requestPathMetadataKey: "/v1/messages/count_tokens"},
+			},
+		},
+		{
+			name: "interactions agent",
+			req: routeRequest{
+				SourceFormat:   config.ProtocolInteractions,
+				RequestedModel: "deep-research-agent",
+				Body:           []byte(`{"agent":"deep-research-agent","input":"hi"}`),
+			},
+		},
+		{
+			name: "gemini generateContentRequest",
+			req: routeRequest{
+				SourceFormat:   config.ProtocolGemini,
+				RequestedModel: "gemini-2.5-flash",
+				Body:           []byte(`{"generateContentRequest":{"contents":[]}}`),
+			},
+		},
+		{
+			name: "codex alpha search",
+			req: routeRequest{
+				SourceFormat:   "codex-alpha-search",
+				RequestedModel: "gpt-5-codex",
+				Body:           []byte(`{"model":"gpt-5-codex"}`),
+			},
+		},
+	}
+
+	for _, tc := range skipCases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := p.Dispatch(pluginabi.MethodModelRoute, mustJSON(t, tc.req))
+			if err != nil {
+				t.Fatalf("route: %v", err)
+			}
+			if resp.(pluginapi.ModelRouteResponse).Handled {
+				t.Fatalf("expected %s to pass through unhandled", tc.name)
+			}
+		})
+	}
+}
+
+func TestExecuteNonStreamAcrossProtocols(t *testing.T) {
+	term := "SYNTHETIC-MULTI-PROTO-TERM"
+	cases := []struct {
+		name       string
+		format     string
+		reqPath    string
+		reqBody    map[string]any
+		respHeader http.Header
+		makeResp   func(maskedBody []byte) []byte
+		verify     func(t *testing.T, resp []byte)
+	}{
+		{
+			name:   "openai chat",
+			format: config.ProtocolOpenAI,
+			reqBody: map[string]any{
+				"model":    "gpt-test",
+				"messages": []map[string]any{{"role": "user", "content": term}},
+			},
+			makeResp: func(maskedBody []byte) []byte {
+				var m map[string]any
+				_ = json.Unmarshal(maskedBody, &m)
+				p := m["messages"].([]any)[0].(map[string]any)["content"].(string)
+				return mustJSON(t, map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": p}}}})
+			},
+			verify: func(t *testing.T, resp []byte) {
+				if !strings.Contains(string(resp), term) {
+					t.Fatalf("expected %q in %s", term, resp)
+				}
+			},
+		},
+		{
+			name:   "openai-response",
+			format: config.ProtocolOpenAIResponse,
+			reqBody: map[string]any{
+				"model": "codex-test",
+				"input": term,
+			},
+			makeResp: func(maskedBody []byte) []byte {
+				var m map[string]any
+				_ = json.Unmarshal(maskedBody, &m)
+				p := m["input"].(string)
+				return mustJSON(t, map[string]any{"output": []map[string]any{{"type": "message", "content": []map[string]any{{"type": "output_text", "text": p}}}}})
+			},
+			verify: func(t *testing.T, resp []byte) {
+				if !strings.Contains(string(resp), term) {
+					t.Fatalf("expected %q in %s", term, resp)
+				}
+			},
+		},
+		{
+			name:   "gemini",
+			format: config.ProtocolGemini,
+			reqBody: map[string]any{
+				"contents": []map[string]any{{"role": "user", "parts": []map[string]any{{"text": term}}}},
+			},
+			makeResp: func(maskedBody []byte) []byte {
+				var m map[string]any
+				_ = json.Unmarshal(maskedBody, &m)
+				p := m["contents"].([]any)[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["text"].(string)
+				return mustJSON(t, map[string]any{"candidates": []map[string]any{{"content": map[string]any{"parts": []map[string]any{{"text": p}}}}}})
+			},
+			verify: func(t *testing.T, resp []byte) {
+				if !strings.Contains(string(resp), term) {
+					t.Fatalf("expected %q in %s", term, resp)
+				}
+			},
+		},
+		{
+			name:   "interactions",
+			format: config.ProtocolInteractions,
+			reqBody: map[string]any{
+				"model": "gemini-2.5-flash",
+				"input": term,
+			},
+			makeResp: func(maskedBody []byte) []byte {
+				var m map[string]any
+				_ = json.Unmarshal(maskedBody, &m)
+				p := m["input"].(string)
+				return mustJSON(t, map[string]any{"steps": []map[string]any{{"type": "model", "content": []map[string]any{{"text": p}}}}})
+			},
+			verify: func(t *testing.T, resp []byte) {
+				if !strings.Contains(string(resp), term) {
+					t.Fatalf("expected %q in %s", term, resp)
+				}
+			},
+		},
+		{
+			name:    "openai-image edits path forwarded",
+			format:  config.ProtocolOpenAIImage,
+			reqPath: "/v1/images/edits",
+			reqBody: map[string]any{
+				"model":  "grok-imagine-image",
+				"prompt": term,
+			},
+			makeResp: func(maskedBody []byte) []byte {
+				var m map[string]any
+				_ = json.Unmarshal(maskedBody, &m)
+				p := m["prompt"].(string)
+				return mustJSON(t, map[string]any{"data": []map[string]any{{"url": "https://example.com/1.png", "revised_prompt": p}}})
+			},
+			verify: func(t *testing.T, resp []byte) {
+				if !strings.Contains(string(resp), term) {
+					t.Fatalf("expected %q in %s", term, resp)
+				}
+			},
+		},
+		{
+			name:   "openai-speech binary preserved",
+			format: config.ProtocolOpenAISpeech,
+			reqBody: map[string]any{
+				"text":     term,
+				"voice_id": "eve",
+			},
+			respHeader: http.Header{"Content-Type": {"audio/mpeg"}, "Content-Length": {"4"}},
+			makeResp: func([]byte) []byte {
+				return []byte{0xff, 0xfb, 0x90, 0x64}
+			},
+			verify: func(t *testing.T, resp []byte) {
+				if !bytes.Equal(resp, []byte{0xff, 0xfb, 0x90, 0x64}) {
+					t.Fatalf("expected binary audio unchanged, got %x", resp)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotReq pluginapi.HostModelExecutionRequest
+			host := newFakeHost(func(method string, payload []byte, reply any) error {
+				if method != pluginabi.MethodHostModelExecute {
+					t.Fatalf("unexpected method %s", method)
+				}
+				if err := json.Unmarshal(payload, &gotReq); err != nil {
+					return err
+				}
+				if strings.Contains(string(gotReq.Body), term) {
+					t.Fatalf("upstream saw unmasked term: %s", gotReq.Body)
+				}
+				hdr := tc.respHeader
+				if hdr == nil {
+					hdr = http.Header{"Content-Type": {"application/json"}}
+				}
+				*reply.(*pluginapi.HostModelExecutionResponse) = pluginapi.HostModelExecutionResponse{
+					Body:    tc.makeResp(gotReq.Body),
+					Headers: hdr,
+				}
+				return nil
+			})
+			p := NewPlugin(engine.New(&config.Config{Words: []string{term}}), host)
+
+			var meta map[string]any
+			if tc.reqPath != "" {
+				meta = map[string]any{requestPathMetadataKey: tc.reqPath}
+			}
+			execResp, err := p.Dispatch(pluginabi.MethodExecutorExecute, mustJSON(t, executorRequest{
+				ExecutorRequest: pluginapi.ExecutorRequest{
+					Model:           "test-model",
+					Format:          tc.format,
+					SourceFormat:    tc.format,
+					OriginalRequest: mustJSON(t, tc.reqBody),
+					Metadata:        meta,
+				},
+			}))
+			if err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if gotReq.EntryProtocol != tc.format || gotReq.ExitProtocol != tc.format {
+				t.Fatalf("protocols = (%q, %q), want (%q, %q)", gotReq.EntryProtocol, gotReq.ExitProtocol, tc.format, tc.format)
+			}
+			if gotReq.Path != tc.reqPath {
+				t.Fatalf("path = %q, want %q", gotReq.Path, tc.reqPath)
+			}
+			tc.verify(t, execResp.(pluginapi.ExecutorResponse).Payload)
+		})
+	}
+}
+
+func TestStreamRestoreBareJSONAndResponsesSplit(t *testing.T) {
+	term := "SYNTHETIC-QUOTE-\"SECRET\""
+	cases := []struct {
+		name         string
+		format       string
+		reqBody      map[string]any
+		buildChunks  func(maskedReq []byte) [][]byte
+		wantContains []string
+	}{
+		{
+			name:   "openai bare json split placeholder",
+			format: config.ProtocolOpenAI,
+			reqBody: map[string]any{
+				"model":    "gpt-test",
+				"stream":   true,
+				"messages": []map[string]any{{"role": "user", "content": term}},
+			},
+			buildChunks: func(maskedReq []byte) [][]byte {
+				var m map[string]any
+				_ = json.Unmarshal(maskedReq, &m)
+				p := m["messages"].([]any)[0].(map[string]any)["content"].(string)
+				mid := len(p) / 2
+				return [][]byte{
+					mustJSON(t, map[string]any{"id": "c1", "choices": []map[string]any{{"index": 0, "delta": map[string]any{"content": p[:mid]}}}}),
+					mustJSON(t, map[string]any{"id": "c1", "choices": []map[string]any{{"index": 0, "delta": map[string]any{"content": p[mid:]}}}}),
+					mustJSON(t, map[string]any{"id": "c1", "choices": []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}}),
+				}
+			},
+			wantContains: []string{`data: `, `SYNTHETIC-QUOTE-\"SECRET\"`, `"finish_reason":"stop"`},
+		},
+		{
+			name:   "gemini bare json split placeholder",
+			format: config.ProtocolGemini,
+			reqBody: map[string]any{
+				"contents": []map[string]any{{"role": "user", "parts": []map[string]any{{"text": term}}}},
+			},
+			buildChunks: func(maskedReq []byte) [][]byte {
+				var m map[string]any
+				_ = json.Unmarshal(maskedReq, &m)
+				p := m["contents"].([]any)[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["text"].(string)
+				mid := len(p) / 2
+				return [][]byte{
+					mustJSON(t, map[string]any{"candidates": []map[string]any{{"content": map[string]any{"parts": []map[string]any{{"text": p[:mid]}}}}}}),
+					mustJSON(t, map[string]any{"candidates": []map[string]any{{"content": map[string]any{"parts": []map[string]any{{"text": p[mid:]}}}, "finishReason": "STOP"}}}),
+				}
+			},
+			wantContains: []string{`data: `, `SYNTHETIC-QUOTE-\"SECRET\"`, `"finishReason":"STOP"`},
+		},
+		{
+			name:   "openai-response sse split placeholder",
+			format: config.ProtocolOpenAIResponse,
+			reqBody: map[string]any{
+				"model":  "codex-test",
+				"stream": true,
+				"input":  term,
+			},
+			buildChunks: func(maskedReq []byte) [][]byte {
+				var m map[string]any
+				_ = json.Unmarshal(maskedReq, &m)
+				p := m["input"].(string)
+				mid := len(p) / 2
+				return [][]byte{
+					[]byte("event: response.output_text.delta\ndata: " + string(mustJSON(t, map[string]any{
+						"type":          "response.output_text.delta",
+						"item_id":       "msg_1",
+						"output_index":  0,
+						"content_index": 0,
+						"delta":         p[:mid],
+					})) + "\n\n"),
+					[]byte("event: response.output_text.delta\ndata: " + string(mustJSON(t, map[string]any{
+						"type":          "response.output_text.delta",
+						"item_id":       "msg_1",
+						"output_index":  0,
+						"content_index": 0,
+						"delta":         p[mid:],
+					})) + "\n\n"),
+					[]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}\n\n"),
+				}
+			},
+			wantContains: []string{`SYNTHETIC-QUOTE-\"SECRET\"`, `response.completed`},
+		},
+		{
+			name:   "openai-response line-by-line sse without newlines",
+			format: config.ProtocolOpenAIResponse,
+			reqBody: map[string]any{
+				"model":  "codex-test",
+				"stream": true,
+				"input":  term,
+			},
+			buildChunks: func(maskedReq []byte) [][]byte {
+				var m map[string]any
+				_ = json.Unmarshal(maskedReq, &m)
+				p := m["input"].(string)
+				mid := len(p) / 2
+				return [][]byte{
+					[]byte("event: response.output_text.delta"),
+					[]byte("data: " + string(mustJSON(t, map[string]any{
+						"type":          "response.output_text.delta",
+						"item_id":       "msg_1",
+						"output_index":  0,
+						"content_index": 0,
+						"delta":         p[:mid],
+					}))),
+					[]byte("event: response.output_text.delta"),
+					[]byte("data: " + string(mustJSON(t, map[string]any{
+						"type":          "response.output_text.delta",
+						"item_id":       "msg_1",
+						"output_index":  0,
+						"content_index": 0,
+						"delta":         p[mid:],
+					}))),
+					[]byte("event: response.completed"),
+					[]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+				}
+			},
+			wantContains: []string{`SYNTHETIC-QUOTE-\"SECRET\"`, `response.completed`},
+		},
+		{
+			name:   "claude partial json split across chunks",
+			format: config.ProtocolClaude,
+			reqBody: map[string]any{
+				"model":    "claude-sonnet-test",
+				"stream":   true,
+				"messages": []map[string]any{{"role": "user", "content": term}},
+			},
+			buildChunks: func(maskedReq []byte) [][]byte {
+				var m map[string]any
+				_ = json.Unmarshal(maskedReq, &m)
+				p := m["messages"].([]any)[0].(map[string]any)["content"].(string)
+				ev := "event: content_block_delta\ndata: " + string(mustJSON(t, map[string]any{
+					"type":  "content_block_delta",
+					"index": 0,
+					"delta": map[string]any{"type": "text_delta", "text": p},
+				})) + "\n\n"
+				split := len("event: content_block_delta\ndata: {\"type\":")
+				return [][]byte{
+					[]byte(ev[:split]),
+					[]byte(ev[split:]),
+					[]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+				}
+			},
+			wantContains: []string{`SYNTHETIC-QUOTE-\"SECRET\"`, `message_stop`},
+		},
+		{
+			name:   "interactions bare json split placeholder",
+			format: config.ProtocolInteractions,
+			reqBody: map[string]any{
+				"model":  "gemini-2.5-flash",
+				"stream": true,
+				"input":  term,
+			},
+			buildChunks: func(maskedReq []byte) [][]byte {
+				var m map[string]any
+				_ = json.Unmarshal(maskedReq, &m)
+				p := m["input"].(string)
+				mid := len(p) / 2
+				return [][]byte{
+					mustJSON(t, map[string]any{"event_type": "step.delta", "index": 0, "delta": map[string]any{"text": p[:mid]}}),
+					mustJSON(t, map[string]any{"event_type": "step.delta", "index": 0, "delta": map[string]any{"text": p[mid:]}}),
+					mustJSON(t, map[string]any{"event_type": "interaction.completed"}),
+				}
+			},
+			wantContains: []string{`SYNTHETIC-QUOTE-\"SECRET\"`, `interaction.completed`},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var chunks [][]byte
+			var emitted strings.Builder
+			readIdx := 0
+
+			host := newFakeHost(func(method string, payload []byte, reply any) error {
+				switch method {
+				case pluginabi.MethodHostModelExecuteStream:
+					var req pluginapi.HostModelExecutionRequest
+					if err := json.Unmarshal(payload, &req); err != nil {
+						return err
+					}
+					chunks = tc.buildChunks(req.Body)
+					*reply.(*pluginapi.HostModelStreamResponse) = pluginapi.HostModelStreamResponse{StreamID: "up-1"}
+				case pluginabi.MethodHostModelStreamRead:
+					out := reply.(*pluginapi.HostModelStreamReadResponse)
+					if readIdx < len(chunks) {
+						out.Payload = chunks[readIdx]
+						readIdx++
+					}
+					if readIdx == len(chunks) {
+						out.Done = true
+					}
+				case pluginabi.MethodHostStreamEmit:
+					var u streamUpdate
+					if err := json.Unmarshal(payload, &u); err != nil {
+						return err
+					}
+					emitted.Write(u.Payload)
+				}
+				return nil
+			})
+
+			p := NewPlugin(engine.New(&config.Config{Words: []string{term}}), host)
+			_, err := p.Dispatch(pluginabi.MethodExecutorExecuteStream, mustJSON(t, executorRequest{
+				ExecutorRequest: pluginapi.ExecutorRequest{
+					Model:           "test-model",
+					Format:          tc.format,
+					SourceFormat:    tc.format,
+					Stream:          true,
+					OriginalRequest: mustJSON(t, tc.reqBody),
+				},
+				StreamID: "out-1",
+			}))
+			if err != nil {
+				t.Fatalf("execute stream: %v", err)
+			}
+
+			select {
+			case <-host.closed:
+			case <-time.After(3 * time.Second):
+				t.Fatal("timed out waiting for stream close")
+			}
+
+			got := emitted.String()
+			for _, want := range tc.wantContains {
+				if !strings.Contains(got, want) {
+					t.Fatalf("expected %q in stream output:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestStreamExecutePropagatesInitialHostError(t *testing.T) {
+	wantErr := pluginabi.NewError("rate_limit", "upstream limited", http.StatusTooManyRequests)
+	host := newFakeHost(func(method string, payload []byte, reply any) error {
+		if method == pluginabi.MethodHostModelExecuteStream {
+			return wantErr
+		}
+		return nil
+	})
+	p := NewPlugin(engine.New(&config.Config{Words: []string{"SECRET"}}), host)
+	_, err := p.Dispatch(pluginabi.MethodExecutorExecuteStream, mustJSON(t, executorRequest{
+		ExecutorRequest: pluginapi.ExecutorRequest{
+			Model:           "test-model",
+			Format:          config.ProtocolOpenAI,
+			SourceFormat:    config.ProtocolOpenAI,
+			Stream:          true,
+			OriginalRequest: []byte(`{"model":"test-model","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+		},
+		StreamID: "out-1",
+	}))
+	abiErr, ok := err.(*pluginabi.Error)
+	if !ok || abiErr.StatusCode() != http.StatusTooManyRequests || abiErr.Code != "rate_limit" {
+		t.Fatalf("expected 429 rate_limit error, got %#v", err)
 	}
 }
