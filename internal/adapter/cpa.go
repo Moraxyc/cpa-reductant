@@ -514,33 +514,7 @@ func (p *Plugin) forwardStream(upstreamID, outputID, exitProtocol, model, callba
 	_ = p.host.Call(pluginabi.MethodHostStreamClose, update, nil)
 }
 
-type boundedCaptureBuffer struct {
-	buf       bytes.Buffer
-	total     int
-	limit     int
-	truncated bool
-}
-
-func (b *boundedCaptureBuffer) Write(p []byte) {
-	if b == nil || len(p) == 0 {
-		return
-	}
-	b.total += len(p)
-	if b.limit <= 0 {
-		return
-	}
-	if b.buf.Len() < b.limit {
-		remain := b.limit - b.buf.Len()
-		if len(p) <= remain {
-			b.buf.Write(p)
-		} else {
-			b.buf.Write(p[:remain])
-			b.truncated = true
-		}
-	} else {
-		b.truncated = true
-	}
-}
+const streamCaptureFlushInterval = 250 * time.Millisecond
 
 func (p *Plugin) restoreStream(upstreamID, outputID, exitProtocol, model, callbackID, alt string, headers http.Header, captureID uint64) error {
 	start := time.Now()
@@ -549,16 +523,20 @@ func (p *Plugin) restoreStream(upstreamID, outputID, exitProtocol, model, callba
 
 	buffer := &sseBuffer{headers: writerHeadersForStream(headers, exitProtocol, alt)}
 	writer := p.engine.NewStreamWriter(buffer)
+	contentType := headers.Get("Content-Type")
 	normalizer := streamPayloadNormalizer{
 		exitProtocol: exitProtocol,
 		alt:          alt,
-		contentType:  headers.Get("Content-Type"),
+		contentType:  contentType,
 	}
-	var upstreamCap, restoredCap *boundedCaptureBuffer
+	var upstreamCap, restoredCap *engine.CaptureBuffer
+	var lastCaptureFlush time.Time
+	captureDirty := false
 	if captureID != 0 {
 		limit := engine.MaxCaptureBodyBytes()
-		upstreamCap = &boundedCaptureBuffer{limit: limit}
-		restoredCap = &boundedCaptureBuffer{limit: limit}
+		upstreamCap = engine.NewCaptureBuffer(limit)
+		restoredCap = engine.NewCaptureBuffer(limit)
+		p.engine.MarkCaptureStreaming(captureID, contentType)
 	}
 	var bytesOut int
 	var streamErr error
@@ -573,15 +551,17 @@ func (p *Plugin) restoreStream(upstreamID, outputID, exitProtocol, model, callba
 			CaptureID:      captureID,
 		}, bytesOut, put, dur, streamErr)
 		if captureID != 0 {
+			upBytes, upTotal, upTrunc := upstreamCap.Snapshot()
+			resBytes, resTotal, resTrunc := restoredCap.Snapshot()
 			p.engine.RecordStreamCapture(
 				captureID,
-				headers.Get("Content-Type"),
-				upstreamCap.buf.Bytes(),
-				upstreamCap.total,
-				upstreamCap.truncated,
-				restoredCap.buf.Bytes(),
-				restoredCap.total,
-				restoredCap.truncated,
+				contentType,
+				upBytes,
+				upTotal,
+				upTrunc,
+				resBytes,
+				resTotal,
+				resTrunc,
 				put,
 				dur,
 				streamErr,
@@ -606,6 +586,7 @@ func (p *Plugin) restoreStream(upstreamID, outputID, exitProtocol, model, callba
 		if len(chunk.Payload) != 0 {
 			if upstreamCap != nil {
 				upstreamCap.Write(chunk.Payload)
+				captureDirty = true
 			}
 			payload := normalizer.Normalize(chunk.Payload)
 			if _, err := writer.Write(payload); err != nil {
@@ -621,6 +602,7 @@ func (p *Plugin) restoreStream(upstreamID, outputID, exitProtocol, model, callba
 			bytesOut += len(outBytes)
 			if restoredCap != nil {
 				restoredCap.Write(outBytes)
+				captureDirty = true
 			}
 			if err := p.host.Call(
 				pluginabi.MethodHostStreamEmit,
@@ -634,6 +616,24 @@ func (p *Plugin) restoreStream(upstreamID, outputID, exitProtocol, model, callba
 		}
 		if chunk.Done {
 			return nil
+		}
+		if captureID != 0 && captureDirty && (lastCaptureFlush.IsZero() || time.Since(lastCaptureFlush) >= streamCaptureFlushInterval) {
+			upBytes, upTotal, upTrunc := upstreamCap.Snapshot()
+			resBytes, resTotal, resTrunc := restoredCap.Snapshot()
+			p.engine.RecordStreamCaptureProgress(
+				captureID,
+				contentType,
+				upBytes,
+				upTotal,
+				upTrunc,
+				resBytes,
+				resTotal,
+				resTrunc,
+				writer.Put(),
+				time.Since(start),
+			)
+			lastCaptureFlush = time.Now()
+			captureDirty = false
 		}
 	}
 }

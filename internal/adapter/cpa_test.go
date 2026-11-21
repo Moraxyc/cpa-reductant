@@ -1150,10 +1150,10 @@ func TestDebugCaptureManagementAndStreamCorrelation(t *testing.T) {
 	}
 	streamEntry := snap.Entries[0]
 	unaryEntry := snap.Entries[1]
-	if !streamEntry.Stream || streamEntry.RestoredCount != 1 || !strings.Contains(streamEntry.RestoredResponse, term) || strings.Contains(streamEntry.UpstreamResponse, term) {
+	if !streamEntry.Stream || streamEntry.Status != "done" || streamEntry.RestoredCount != 1 || !strings.Contains(streamEntry.RestoredResponse, term) || strings.Contains(streamEntry.UpstreamResponse, term) {
 		t.Fatalf("unexpected stream capture entry: %+v", streamEntry)
 	}
-	if unaryEntry.Stream || unaryEntry.RestoredCount != 1 || !strings.Contains(unaryEntry.RawRequest, term) || strings.Contains(unaryEntry.MaskedRequest, term) || !strings.Contains(unaryEntry.RestoredResponse, term) {
+	if unaryEntry.Stream || unaryEntry.Status != "done" || unaryEntry.RestoredCount != 1 || !strings.Contains(unaryEntry.RawRequest, term) || strings.Contains(unaryEntry.MaskedRequest, term) || !strings.Contains(unaryEntry.RestoredResponse, term) {
 		t.Fatalf("unexpected unary capture entry: %+v", unaryEntry)
 	}
 	if len(unaryEntry.Replacements) != 1 || unaryEntry.Replacements[0].Original != term {
@@ -1198,5 +1198,128 @@ func TestDebugCaptureManagementAndStreamCorrelation(t *testing.T) {
 	}
 	if badRaw.(pluginapi.ManagementResponse).StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 on negative ttl_seconds, got %#v", badRaw)
+	}
+}
+
+func TestDebugCaptureStreamingInProgressVisible(t *testing.T) {
+	term := "SYNTHETIC-STREAM-PROGRESS-TERM"
+	firstChunkSent := make(chan struct{})
+	releaseSecondChunk := make(chan struct{})
+	readCount := 0
+	var placeholder string
+
+	host := newFakeHost(func(method string, payload []byte, reply any) error {
+		switch method {
+		case pluginabi.MethodHostModelExecuteStream:
+			var req pluginapi.HostModelExecutionRequest
+			if err := json.Unmarshal(payload, &req); err != nil {
+				return err
+			}
+			var body map[string]any
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				return err
+			}
+			placeholder = body["messages"].([]any)[0].(map[string]any)["content"].(string)
+			return json.Unmarshal(mustJSON(t, pluginapi.HostModelStreamResponse{
+				StreamID: "up-prog-1",
+				Headers:  http.Header{"Content-Type": {"text/event-stream"}},
+			}), reply)
+		case pluginabi.MethodHostModelStreamRead:
+			readCount++
+			switch readCount {
+			case 1:
+				return json.Unmarshal(mustJSON(t, pluginapi.HostModelStreamReadResponse{
+					Payload: []byte("data: {\"delta\":" + string(mustJSON(t, placeholder)) + "}\n\n"),
+				}), reply)
+			case 2:
+				close(firstChunkSent)
+				<-releaseSecondChunk
+				return json.Unmarshal(mustJSON(t, pluginapi.HostModelStreamReadResponse{
+					Payload: []byte("data: {\"delta\":\"tail\"}\n\n"),
+					Done:    true,
+				}), reply)
+			default:
+				return json.Unmarshal(mustJSON(t, pluginapi.HostModelStreamReadResponse{Done: true}), reply)
+			}
+		case pluginabi.MethodHostStreamEmit, pluginabi.MethodHostStreamClose, pluginabi.MethodHostModelStreamClose:
+			return nil
+		default:
+			t.Fatalf("unexpected host method %s", method)
+		}
+		return nil
+	})
+
+	p := NewPlugin(engine.New(nil), host)
+	defer p.Shutdown()
+	if _, err := p.Dispatch(pluginabi.MethodPluginRegister, mustJSON(t, map[string]any{
+		"config_yaml": []byte("words:\n  - " + term + "\n"),
+	})); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method: http.MethodPost,
+		Path:   "/v0/management/cpa-reductant/debug/capture",
+		Body:   []byte(`{"enabled":true,"ttl_seconds":120}`),
+	})); err != nil {
+		t.Fatalf("enable debug capture: %v", err)
+	}
+
+	if _, err := p.Dispatch(pluginabi.MethodExecutorExecuteStream, mustJSON(t, executorRequest{
+		ExecutorRequest: pluginapi.ExecutorRequest{
+			Model:        "gpt-chat-test",
+			SourceFormat: config.ProtocolOpenAI,
+			Format:       config.ProtocolOpenAI,
+			Payload:      mustJSON(t, map[string]any{"stream": true, "messages": []map[string]string{{"role": "user", "content": term}}}),
+		},
+		StreamID: "out-1",
+	})); err != nil {
+		t.Fatalf("execute stream: %v", err)
+	}
+
+	<-firstChunkSent
+	// Poll briefly to observe mid-stream progress before the second chunk is released.
+	var midSnap engine.DebugCaptureSnapshot
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		getRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+			Method: http.MethodGet,
+			Path:   "/v0/management/cpa-reductant/debug/capture",
+		}))
+		if err != nil {
+			t.Fatalf("get mid-stream debug capture: %v", err)
+		}
+		if err := json.Unmarshal(getRaw.(pluginapi.ManagementResponse).Body, &midSnap); err != nil {
+			t.Fatalf("decode mid-stream snapshot: %v", err)
+		}
+		if len(midSnap.Entries) == 1 && midSnap.Entries[0].RestoredResponse != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(midSnap.Entries) != 1 || midSnap.Entries[0].Status != "streaming" || !strings.Contains(midSnap.Entries[0].RestoredResponse, term) || midSnap.Entries[0].RestoredCount != 1 {
+		close(releaseSecondChunk)
+		t.Fatalf("expected streaming mid-flight capture with restored chunk 1, got %+v", midSnap)
+	}
+
+	close(releaseSecondChunk)
+	select {
+	case <-host.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stream close")
+	}
+
+	getRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/management/cpa-reductant/debug/capture",
+	}))
+	if err != nil {
+		t.Fatalf("get final debug capture: %v", err)
+	}
+	var finalSnap engine.DebugCaptureSnapshot
+	if err := json.Unmarshal(getRaw.(pluginapi.ManagementResponse).Body, &finalSnap); err != nil {
+		t.Fatalf("decode final snapshot: %v", err)
+	}
+	if len(finalSnap.Entries) != 1 || finalSnap.Entries[0].Status != "done" || !strings.Contains(finalSnap.Entries[0].RestoredResponse, "tail") {
+		t.Fatalf("expected final done capture with tail chunk, got %+v", finalSnap)
 	}
 }

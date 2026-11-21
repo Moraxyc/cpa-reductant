@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/moraxyc/cpa-reductant/internal/config"
 )
@@ -365,10 +366,33 @@ func TestEngineDebugCaptureLifecycleAndTTL(t *testing.T) {
 		t.Fatalf("expected ClearDebugCapture to empty entries, got %+v", cleared)
 	}
 
-	// Truncation preserves valid UTF-8 boundaries.
-	big := append([]byte(strings.Repeat("a", MaxCaptureBodyBytes()-1)), []byte("中文结尾")...)
+	// Truncation preserves head + tail and valid UTF-8 boundaries.
+	bigPrefix := strings.Repeat("a", captureHeadBytes-1) + "中文中间"
+	bigMiddle := strings.Repeat("m", MaxCaptureBodyBytes())
+	bigTail := "尾部中文" + strings.Repeat("z", 1024)
+	big := []byte(bigPrefix + bigMiddle + bigTail)
 	truncStr, total, truncated := truncateCaptureBytes(big, MaxCaptureBodyBytes())
 	if !truncated || total != len(big) || len(truncStr) > MaxCaptureBodyBytes() {
 		t.Fatalf("unexpected truncation result: len=%d total=%d truncated=%v", len(truncStr), total, truncated)
+	}
+	if !utf8.ValidString(truncStr) {
+		t.Fatalf("expected valid UTF-8 after head+tail truncation")
+	}
+	if !strings.HasPrefix(truncStr, "aaaa") || !strings.Contains(truncStr, "... [omitted ") || !strings.HasSuffix(truncStr, bigTail) {
+		t.Fatalf("expected head+tail marker preservation, got prefix=%q suffix=%q", truncStr[:32], truncStr[len(truncStr)-64:])
+	}
+
+	// CaptureBuffer preserves head + tail incrementally across chunked writes.
+	cb := NewCaptureBuffer(MaxCaptureBodyBytes())
+	for off := 0; off < len(big); off += 4097 {
+		end := min(len(big), off+4097)
+		cb.Write(big[off:end])
+	}
+	cbBytes, cbTotal, cbTrunc := cb.Snapshot()
+	if !cbTrunc || cbTotal != len(big) || len(cbBytes) > MaxCaptureBodyBytes() || !utf8.Valid(cbBytes) {
+		t.Fatalf("unexpected CaptureBuffer snapshot: len=%d total=%d trunc=%v valid=%v", len(cbBytes), cbTotal, cbTrunc, utf8.Valid(cbBytes))
+	}
+	if !strings.Contains(string(cbBytes), "... [omitted ") || !strings.HasSuffix(string(cbBytes), bigTail) {
+		t.Fatalf("expected CaptureBuffer to preserve head+tail, suffix=%q", string(cbBytes[len(cbBytes)-64:]))
 	}
 }

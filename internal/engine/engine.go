@@ -577,7 +577,22 @@ func (e *Engine) CaptureError(captureID uint64, err error) {
 		return
 	}
 	e.capture.update(captureID, func(ev *DebugCaptureEntry) {
+		ev.Status = "error"
 		ev.Error = err.Error()
+	})
+}
+
+func (e *Engine) MarkCaptureStreaming(captureID uint64, contentType string) {
+	if e == nil || e.capture == nil || captureID == 0 {
+		return
+	}
+	binary := IsBinaryContentType(contentType)
+	e.capture.update(captureID, func(ev *DebugCaptureEntry) {
+		ev.Status = "streaming"
+		ev.ResponseBinary = binary
+		if contentType != "" {
+			ev.ResponseContentType = contentType
+		}
 	})
 }
 
@@ -631,6 +646,7 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 				rawStr, rawBytes, rawTrunc := truncateCaptureBytes(body, maxCaptureBodyBytes)
 				e.capture.recordRequest(DebugCaptureEntry{
 					ID:                  captureID,
+					Status:              "error",
 					Protocol:            meta.Protocol,
 					Model:               meta.Model,
 					Stream:              meta.Stream,
@@ -668,6 +684,7 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 			rawStr, rawBytes, rawTrunc := truncateCaptureBytes(body, maxCaptureBodyBytes)
 			e.capture.recordRequest(DebugCaptureEntry{
 				ID:                  captureID,
+				Status:              "error",
 				Protocol:            meta.Protocol,
 				Model:               meta.Model,
 				Stream:              meta.Stream,
@@ -724,8 +741,13 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 	if captureID != 0 && e.capture != nil {
 		rawStr, rawBytes, rawTrunc := truncateCaptureBytes(body, maxCaptureBodyBytes)
 		maskedStr, maskedBytes, maskedTrunc := truncateCaptureBytes(masked, maxCaptureBodyBytes)
+		status := "pending"
+		if blocked {
+			status = "done"
+		}
 		entry := DebugCaptureEntry{
 			ID:                     captureID,
+			Status:                 status,
 			Protocol:               meta.Protocol,
 			Model:                  meta.Model,
 			Stream:                 meta.Stream,
@@ -816,6 +838,7 @@ func (e *Engine) RestoreResponseWithMeta(meta RequestMeta, contentType string, b
 			durMS := roundMS(float64(dur.Microseconds()) / 1000.0)
 			binary := IsBinaryContentType(contentType)
 			e.capture.update(meta.CaptureID, func(ev *DebugCaptureEntry) {
+				ev.Status = "done"
 				ev.RestoreDurationMS = durMS
 				ev.ResponseBinary = binary
 				ev.ResponseContentType = contentType
@@ -831,6 +854,7 @@ func (e *Engine) RestoreResponseWithMeta(meta RequestMeta, contentType string, b
 		if meta.CaptureID != 0 && e.capture != nil {
 			durMS := roundMS(float64(dur.Microseconds()) / 1000.0)
 			e.capture.update(meta.CaptureID, func(ev *DebugCaptureEntry) {
+				ev.Status = "done"
 				ev.RestoreDurationMS = durMS
 				ev.ResponseBinary = true
 				ev.ResponseContentType = contentType
@@ -878,6 +902,7 @@ func (e *Engine) RestoreResponseWithMeta(meta RequestMeta, contentType string, b
 		durMS := roundMS(float64(dur.Microseconds()) / 1000.0)
 		items := resolveCaptureRestoredItems(put, shape)
 		e.capture.update(meta.CaptureID, func(ev *DebugCaptureEntry) {
+			ev.Status = "done"
 			ev.RestoreDurationMS = durMS
 			ev.ResponseContentType = contentType
 			ev.UpstreamResponse = upStr
@@ -893,8 +918,70 @@ func (e *Engine) RestoreResponseWithMeta(meta RequestMeta, contentType string, b
 	return out, restoredCount
 }
 
+func (e *Engine) RecordStreamCaptureProgress(
+	captureID uint64,
+	contentType string,
+	upstream []byte,
+	upstreamTotal int,
+	upstreamTruncated bool,
+	restored []byte,
+	restoredTotal int,
+	restoredTruncated bool,
+	put map[string]int,
+	dur time.Duration,
+) {
+	e.recordStreamCapture(
+		captureID,
+		"streaming",
+		contentType,
+		upstream,
+		upstreamTotal,
+		upstreamTruncated,
+		restored,
+		restoredTotal,
+		restoredTruncated,
+		put,
+		dur,
+		nil,
+	)
+}
+
 func (e *Engine) RecordStreamCapture(
 	captureID uint64,
+	contentType string,
+	upstream []byte,
+	upstreamTotal int,
+	upstreamTruncated bool,
+	restored []byte,
+	restoredTotal int,
+	restoredTruncated bool,
+	put map[string]int,
+	dur time.Duration,
+	err error,
+) {
+	status := "done"
+	if err != nil {
+		status = "error"
+	}
+	e.recordStreamCapture(
+		captureID,
+		status,
+		contentType,
+		upstream,
+		upstreamTotal,
+		upstreamTruncated,
+		restored,
+		restoredTotal,
+		restoredTruncated,
+		put,
+		dur,
+		err,
+	)
+}
+
+func (e *Engine) recordStreamCapture(
+	captureID uint64,
+	status string,
 	contentType string,
 	upstream []byte,
 	upstreamTotal int,
@@ -938,6 +1025,7 @@ func (e *Engine) RecordStreamCapture(
 	items := resolveCaptureRestoredItems(put, shape)
 	durMS := roundMS(float64(dur.Microseconds()) / 1000.0)
 	e.capture.update(captureID, func(ev *DebugCaptureEntry) {
+		ev.Status = status
 		ev.RestoreDurationMS = durMS
 		ev.ResponseBinary = binary
 		ev.ResponseContentType = contentType

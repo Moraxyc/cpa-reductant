@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -16,6 +17,8 @@ const (
 	defaultCaptureCapacity = 30
 	maxCaptureCapacity     = 100
 	maxCaptureBodyBytes    = 128 * 1024
+	captureHeadBytes       = 16 * 1024
+	captureMarkerReserve   = 64
 )
 
 // CaptureReplacement records one detected sensitive value together with its
@@ -42,6 +45,7 @@ type CaptureRestoredItem struct {
 type DebugCaptureEntry struct {
 	ID                        uint64                `json:"id"`
 	Timestamp                 string                `json:"timestamp"`
+	Status                    string                `json:"status,omitempty"`
 	Protocol                  string                `json:"protocol,omitempty"`
 	Model                     string                `json:"model,omitempty"`
 	Stream                    bool                  `json:"stream,omitempty"`
@@ -329,6 +333,62 @@ func (d *debugCapture) snapshotLocked(now time.Time, limit int, idFilter uint64,
 	return out
 }
 
+func captureHeadTailBudgets(limit int) (headCap, tailCap int, headTail bool) {
+	if limit < 256 {
+		return limit, 0, false
+	}
+	headCap = min(captureHeadBytes, limit/8)
+	tailCap = limit - headCap - captureMarkerReserve
+	if headCap <= 0 || tailCap <= 0 {
+		return limit, 0, false
+	}
+	return headCap, tailCap, true
+}
+
+func trimIncompleteTrailingRune(b []byte) []byte {
+	n := len(b)
+	if n == 0 {
+		return b
+	}
+	minStart := max(0, n-utf8.UTFMax)
+	for i := n - 1; i >= minStart; i-- {
+		if utf8.RuneStart(b[i]) {
+			if !utf8.FullRune(b[i:]) {
+				return b[:i]
+			}
+			return b
+		}
+	}
+	return b
+}
+
+func trimIncompleteLeadingRune(b []byte) []byte {
+	limit := min(len(b), utf8.UTFMax)
+	i := 0
+	for i < limit && !utf8.RuneStart(b[i]) {
+		i++
+	}
+	return b[i:]
+}
+
+func formatHeadTailBytes(head, tail []byte, total int) []byte {
+	validHead := trimIncompleteTrailingRune(head)
+	validTail := trimIncompleteLeadingRune(tail)
+	omitted := total - len(validHead) - len(validTail)
+	if omitted <= 0 {
+		out := make([]byte, 0, len(validHead)+len(validTail))
+		out = append(out, validHead...)
+		out = append(out, validTail...)
+		return out
+	}
+	marker := fmt.Sprintf("\n... [omitted %d bytes] ...\n", omitted)
+	out := make([]byte, 0, len(validHead)+len(marker)+len(validTail))
+	out = append(out, validHead...)
+	out = append(out, marker...)
+	out = append(out, validTail...)
+	return out
+}
+
 func truncateCaptureBytes(b []byte, limit int) (string, int, bool) {
 	total := len(b)
 	if total == 0 {
@@ -337,34 +397,135 @@ func truncateCaptureBytes(b []byte, limit int) (string, int, bool) {
 	if limit <= 0 || total <= limit {
 		return string(b), total, false
 	}
-	cut := limit
-	for cut > 0 && !utf8.RuneStart(b[cut]) {
-		cut--
+	headCap, tailCap, ok := captureHeadTailBudgets(limit)
+	if !ok {
+		cut := limit
+		for cut > 0 && !utf8.RuneStart(b[cut]) {
+			cut--
+		}
+		if cut == 0 {
+			cut = limit
+		}
+		return string(b[:cut]), total, true
 	}
-	if cut == 0 {
-		cut = limit
-	}
-	return string(b[:cut]), total, true
+	out := formatHeadTailBytes(b[:headCap], b[total-tailCap:], total)
+	return string(out), total, true
 }
 
-func truncateCaptureString(s string, total int, limit int) (string, int, bool) {
-	if total <= 0 {
-		total = len(s)
+// CaptureBuffer stores bounded request/response payloads while preserving both
+// the leading context and the latest trailing bytes when exceeding Limit.
+type CaptureBuffer struct {
+	limit    int
+	headCap  int
+	tailCap  int
+	headTail bool
+	total    int
+	overflow bool
+	headBuf  []byte
+	tailRing []byte
+	tailPos  int
+	tailLen  int
+}
+
+func NewCaptureBuffer(limit int) *CaptureBuffer {
+	if limit <= 0 {
+		limit = maxCaptureBodyBytes
 	}
-	if total == 0 {
-		return "", 0, false
+	headCap, tailCap, headTail := captureHeadTailBudgets(limit)
+	return &CaptureBuffer{
+		limit:    limit,
+		headCap:  headCap,
+		tailCap:  tailCap,
+		headTail: headTail,
 	}
-	if limit <= 0 || len(s) <= limit {
-		return s, total, total > len(s)
+}
+
+func (b *CaptureBuffer) Write(p []byte) {
+	if b == nil || len(p) == 0 {
+		return
 	}
-	cut := limit
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
+	if !b.headTail {
+		b.total += len(p)
+		if len(b.headBuf) < b.limit {
+			remain := b.limit - len(b.headBuf)
+			if len(p) <= remain {
+				b.headBuf = append(b.headBuf, p...)
+			} else {
+				b.headBuf = append(b.headBuf, p[:remain]...)
+				b.overflow = true
+			}
+		} else {
+			b.overflow = true
+		}
+		return
 	}
-	if cut == 0 {
-		cut = limit
+	if !b.overflow {
+		if b.total+len(p) <= b.limit {
+			b.headBuf = append(b.headBuf, p...)
+			b.total += len(p)
+			return
+		}
+		b.overflow = true
+		b.tailRing = make([]byte, b.tailCap)
+		if len(b.headBuf) >= b.headCap {
+			rem := b.headBuf[b.headCap:]
+			b.headBuf = slices.Clone(b.headBuf[:b.headCap])
+			b.writeTail(rem)
+			b.writeTail(p)
+		} else {
+			need := b.headCap - len(b.headBuf)
+			if len(p) <= need {
+				b.headBuf = append(b.headBuf, p...)
+			} else {
+				b.headBuf = append(b.headBuf, p[:need]...)
+				b.writeTail(p[need:])
+			}
+		}
+		b.total += len(p)
+		return
 	}
-	return s[:cut], total, true
+	b.writeTail(p)
+	b.total += len(p)
+}
+
+func (b *CaptureBuffer) writeTail(p []byte) {
+	if b.tailCap <= 0 || len(p) == 0 {
+		return
+	}
+	if len(p) >= b.tailCap {
+		copy(b.tailRing, p[len(p)-b.tailCap:])
+		b.tailPos = 0
+		b.tailLen = b.tailCap
+		return
+	}
+	first := min(len(p), b.tailCap-b.tailPos)
+	copy(b.tailRing[b.tailPos:], p[:first])
+	if first < len(p) {
+		copy(b.tailRing[0:], p[first:])
+	}
+	b.tailPos = (b.tailPos + len(p)) % b.tailCap
+	b.tailLen = min(b.tailCap, b.tailLen+len(p))
+}
+
+func (b *CaptureBuffer) Snapshot() ([]byte, int, bool) {
+	if b == nil || b.total == 0 {
+		return nil, 0, false
+	}
+	if !b.overflow {
+		return slices.Clone(b.headBuf), b.total, false
+	}
+	if !b.headTail {
+		valid := trimIncompleteTrailingRune(b.headBuf)
+		return slices.Clone(valid), b.total, true
+	}
+	tail := make([]byte, b.tailLen)
+	if b.tailLen < b.tailCap {
+		copy(tail, b.tailRing[:b.tailLen])
+	} else {
+		n := copy(tail, b.tailRing[b.tailPos:])
+		copy(tail[n:], b.tailRing[:b.tailPos])
+	}
+	return formatHeadTailBytes(b.headBuf, tail, b.total), b.total, true
 }
 
 func resolveCaptureReplacements(hits []redact.Hit, shape bool) []CaptureReplacement {

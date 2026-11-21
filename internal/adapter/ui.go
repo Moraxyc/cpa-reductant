@@ -558,12 +558,16 @@ function renderCaptureSnap(snap){
       restored.map(function(r){
         return '<tr><td class="mono ph-val">' + escCap(r.placeholder) + '</td><td class="mono orig-val">' + escCap(r.original || '-') + '</td><td class="mono">' + (r.count || 0) + '</td></tr>';
       }).join('') + '</tbody></table>') : '';
-    var upText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + (ev.upstream_response_bytes || 0) + ' B]') : prettyCap(ev.upstream_response);
-    var reText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + (ev.restored_response_bytes || 0) + ' B]') : prettyCap(ev.restored_response);
+    var statusBadge = '';
+    if(ev.status === 'streaming') statusBadge = '<span class="badge badge-amber">流式传输中</span>';
+    else if(ev.status === 'pending') statusBadge = '<span class="badge badge-muted">等待响应</span>';
+    else if(ev.status === 'error') statusBadge = '<span class="badge badge-red">异常</span>';
+    var upText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + (ev.upstream_response_bytes || 0) + ' B]') : (prettyCap(ev.upstream_response) || (ev.status === 'streaming' ? '[流式传输中，等待数据...]' : ''));
+    var reText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + (ev.restored_response_bytes || 0) + ' B]') : (prettyCap(ev.restored_response) || (ev.status === 'streaming' ? '[流式传输中，等待输出...]' : ''));
     return '<details class="cap-item" data-cap-id="' + ev.id + '"' + openAttr + '>' +
       '<summary class="cap-summary">' +
         '<span class="mono"><strong>#' + ev.id + '</strong> ' + escCap(ev.timestamp) + ' · ' + escCap(ev.protocol || '-') + (ev.model ? ' / ' + escCap(ev.model) : '') + (ev.stream ? ' [SSE]' : '') + '</span>' +
-        '<span class="actions"><span class="badge badge-blue">' + escCap(ev.action) + '</span><span class="sub mono">替换 ' + reps.length + ' · 还原 ' + (ev.restored_count || 0) + '</span></span>' +
+        '<span class="actions">' + statusBadge + '<span class="badge badge-blue">' + escCap(ev.action) + '</span><span class="sub mono">替换 ' + reps.length + ' · 还原 ' + (ev.restored_count || 0) + '</span></span>' +
       '</summary>' +
       '<div class="cap-body">' +
         (ev.error ? '<div class="err-box">' + escCap(ev.error) + '</div>' : '') +
@@ -1194,12 +1198,16 @@ body.embedded .auth-wrap{margin-top:12px}
         restored.map(function(r){
           return '<tr><td class="mono ph-val">' + esc(r.placeholder) + '</td><td class="mono orig-val">' + esc(r.original || '-') + '</td><td class="mono">' + (r.count || 0) + '</td></tr>';
         }).join('') + '</tbody></table>') : '';
-      var upText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + fmtBytes(ev.upstream_response_bytes || 0) + ']') : prettyText(ev.upstream_response);
-      var reText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + fmtBytes(ev.restored_response_bytes || 0) + ']') : prettyText(ev.restored_response);
+      var statusBadge = '';
+      if(ev.status === 'streaming') statusBadge = '<span class="badge badge-amber">流式传输中</span>';
+      else if(ev.status === 'pending') statusBadge = '<span class="badge badge-muted">等待响应</span>';
+      else if(ev.status === 'error') statusBadge = '<span class="badge badge-red">异常</span>';
+      var upText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + fmtBytes(ev.upstream_response_bytes || 0) + ']') : (prettyText(ev.upstream_response) || (ev.status === 'streaming' ? '[流式传输中，等待数据...]' : ''));
+      var reText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + fmtBytes(ev.restored_response_bytes || 0) + ']') : (prettyText(ev.restored_response) || (ev.status === 'streaming' ? '[流式传输中，等待输出...]' : ''));
       return '<details class="cap-item" data-cap-id="' + ev.id + '"' + openAttr + '>' +
         '<summary class="cap-summary">' +
           '<span class="mono"><strong>#' + ev.id + '</strong> ' + esc(shortTime(ev.timestamp)) + ' · ' + esc(ev.protocol || '-') + (ev.model ? ' / ' + esc(ev.model) : '') + (ev.stream ? ' [SSE]' : '') + '</span>' +
-          '<span class="actions"><span class="badge ' + actionClass(ev.action) + '">' + esc(actionLabel(ev.action)) + '</span><span class="sub mono">替换 ' + reps.length + ' · 还原 ' + (ev.restored_count || 0) + '</span></span>' +
+          '<span class="actions">' + statusBadge + '<span class="badge ' + actionClass(ev.action) + '">' + esc(actionLabel(ev.action)) + '</span><span class="sub mono">替换 ' + reps.length + ' · 还原 ' + (ev.restored_count || 0) + '</span></span>' +
         '</summary>' +
         '<div class="cap-body">' +
           (ev.error ? '<div class="err-box">' + esc(ev.error) + '</div>' : '') +
