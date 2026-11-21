@@ -51,11 +51,27 @@ plugins:
   configs:
     cpa-reductant:
       enabled: true
-      models: [your-existing-claude-model] # 省略或 [] = 所有 Claude 格式模型
+      models: [your-existing-model] # 省略或 [] = 所有已配置模型
+      protocols: []                 # 省略或 [] = 所有已支持的 CPA 通讯格式
       words: [example-private-term]
       block_terms: false # true 时拒绝命中自定义词的请求
 ```
 
 ## 支持范围与限制
 
-目前仅覆盖 Claude `/v1/messages`（JSON 与 SSE）。暂未接入本地 PII 模型，暂不支持其他协议、Home、WebSocket、`count_tokens` 与租户级还原状态隔离；插件未加载或路由回调出错时，CPA 仍可能走默认原生路由。
+已支持 CPA 的全部主流通讯格式（JSON 与流式 SSE）：
+
+- `claude`：`/v1/messages`（`/v1/messages/count_tokens` 透传原生计数）
+- `openai`：`/v1/chat/completions`、`/v1/completions`
+- `openai-response`：`/v1/responses`、`/v1/responses/compact`、`/backend-api/codex/responses`（支持 WebSocket `/v1/responses` 客户端接入，上游转发会回退为 HTTP）
+- `gemini`：`/v1beta/models/*:generateContent`、`:streamGenerateContent`
+- `interactions`：`/v1beta/interactions`（`model` 请求；`agent` 原生请求透传）
+- `openai-image` / `openai-speech` / `openai-video`：文生图/改图、TTS（保留二进制音频响应）、视频生成
+- `codex` / `antigravity`：SDK 内部格式
+
+当前限制：
+
+- 仅使用规则与 `words` 词表脱敏，暂未接入本地 PII 模型。
+- 暂不支持 CPA Home 模式与 `/v1/alpha/search`（CPA 原生限制）。
+- `count_tokens` 与 `interactions` `agent` 请求会直接透传原生处理，不做脱敏。
+- 占位符还原映射在进程内共享，暂未按租户隔离；插件未加载或路由失败时，CPA 会回退原生路由直出。
