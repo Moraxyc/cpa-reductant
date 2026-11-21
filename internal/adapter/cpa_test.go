@@ -961,6 +961,11 @@ func TestManagementStatusAndPreview(t *testing.T) {
 	if !strings.Contains(portalBody, "auth-form") || !strings.Contains(portalBody, "/v0/management/cpa-reductant/status") || !strings.Contains(portalBody, "body.embedded") {
 		t.Fatalf("expected login form, status API endpoint, and embedded layout rule in:\n%s", portalBody)
 	}
+	for _, want := range []string{`data-fold="model"`, `data-fold="kinds"`, `data-fold="finders"`, `data-fold="protocols"`, `data-fold="models"`, `data-fold="events"`, `data-fold="capture"`, `data-fold="preview"`, `fold-btn`, `initCardFolds`} {
+		if !strings.Contains(portalBody, want) {
+			t.Fatalf("resource portal missing collapsible section marker %q", want)
+		}
+	}
 	for _, forbidden := range []string{"claude-sonnet-test", "SYNTHETIC-MGMT-SECRET", "bob@acme.io", "TERM_"} {
 		if strings.Contains(portalBody, forbidden) {
 			t.Fatalf("resource portal must not leak runtime/config data %q", forbidden)
@@ -984,6 +989,11 @@ func TestManagementStatusAndPreview(t *testing.T) {
 		htmlBody := string(htmlResp.Body)
 		if !strings.Contains(htmlBody, "cpa-reductant") || !strings.Contains(htmlBody, "claude-sonnet-test") || !strings.Contains(htmlBody, "TERM") {
 			t.Fatalf("expected dashboard HTML to contain service, model, and kind metrics:\n%s", htmlBody)
+		}
+		for _, want := range []string{`data-fold="events"`, `data-fold="capture"`, `data-fold="preview"`, `fold-btn`, `initCardFolds`} {
+			if !strings.Contains(htmlBody, want) {
+				t.Fatalf("dashboard HTML missing collapsible section marker %q", want)
+			}
 		}
 		if strings.Contains(htmlBody, "SYNTHETIC-MGMT-SECRET") || strings.Contains(htmlBody, "bob@acme.io") {
 			t.Fatalf("dashboard HTML must never leak plaintext secrets or warned emails")

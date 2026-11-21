@@ -176,7 +176,7 @@ h2{margin:0 0 12px;font-size:14px;font-weight:600;color:var(--text);display:flex
 .chip{font-size:12px;padding:2px 8px;border-radius:6px;background:var(--surface-2);border:1px solid var(--border);color:var(--muted)}
 .chip strong{color:var(--text)}
 .grid-4{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
-.grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px}
+.grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px;align-items:start}
 .kpi-label{font-size:12px;color:var(--muted);margin-bottom:4px}
 .kpi-val{font-size:26px;font-weight:700;letter-spacing:-.02em;line-height:1.15}
 .kpi-meta{margin-top:8px;font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:10px}
@@ -217,7 +217,16 @@ textarea{width:100%;min-height:76px;padding:10px;border-radius:8px;border:1px so
 .kv-val{font-family:var(--mono);word-break:break-all}
 .guide-box{margin-top:10px;padding:10px 12px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12px}
 .guide-box summary{cursor:pointer;font-weight:600;color:var(--text)}
-.guide-box .code-box{margin-top:8px}`
+.guide-box .code-box{margin-top:8px}
+.card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:0 0 12px}
+.card.collapsed .card-head{margin-bottom:0}
+.card.collapsed .card-body{display:none}
+.fold-btn{background:none;border:none;padding:0;margin:0;color:var(--text);font:600 14px/1.4 var(--sans);cursor:pointer;display:inline-flex;align-items:center;gap:8px;text-align:left}
+.fold-btn:hover .fold-label{color:var(--blue)}
+.fold-arrow{width:18px;height:18px;border-radius:4px;background:var(--surface-2);border:1px solid var(--border);display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--muted);transition:border-color .15s ease,color .15s ease}
+.fold-arrow::before{content:"";width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid currentColor;transition:transform .15s ease}
+.card.collapsed .fold-arrow::before{transform:rotate(-90deg)}
+.fold-btn:hover .fold-arrow{border-color:var(--blue);color:var(--blue)}`
 
 const dashboardHTML = `<!doctype html>
 <html lang="zh-CN">
@@ -283,9 +292,12 @@ const dashboardHTML = `<!doctype html>
     {{if .Status.Model.DiskCacheError}}<div class="err-box">磁盘缓存写入失败: {{.Status.Model.DiskCacheError}}</div>{{end}}
   </div>
 
-  <div class="card">
-    <h2>
-      <span>本地 PII 模型 ({{.Status.Model.Name}}) <span class="sub">用于识别人名、地址、电话等语义实体</span></span>
+  <div class="card" data-fold="model">
+    <div class="card-head">
+      <button class="fold-btn" type="button" aria-expanded="true">
+        <span class="fold-arrow" aria-hidden="true"></span>
+        <span class="fold-label">本地 PII 模型 ({{.Status.Model.Name}}) <span class="sub">用于识别人名、地址、电话等语义实体</span></span>
+      </button>
       <span class="actions">
         {{if not .Status.Model.Enabled}}<span class="badge badge-muted">未启用</span>
         {{else if .Status.Model.Loaded}}<span class="badge badge-green">已加载 ({{.Status.Model.Cores}} 核)</span>
@@ -293,7 +305,8 @@ const dashboardHTML = `<!doctype html>
         {{else if .Status.Model.Installed}}<span class="badge badge-blue">权重就绪</span>
         {{else}}<span class="badge badge-amber">缺失权重</span>{{end}}
       </span>
-    </h2>
+    </div>
+    <div class="card-body">
     <div class="kv-grid">
       <div class="kv-item"><div class="kv-label">期望目录 (model.dir)</div><div class="kv-val">{{if .Status.Model.Dir}}{{.Status.Model.Dir}}{{else}}-{{end}}</div></div>
       <div class="kv-item"><div class="kv-label">实际加载路径 / 布局</div><div class="kv-val">{{if .Status.Model.ResolvedDir}}{{.Status.Model.ResolvedDir}} ({{.Status.Model.Layout}}){{else}}{{.Status.Model.Layout}}{{end}}</div></div>
@@ -306,6 +319,7 @@ const dashboardHTML = `<!doctype html>
       <div class="bar-track" style="margin-top:4px"><div class="bar-fill" style="width:{{printf "%.1f" .DownloadPercent}}%"></div></div>
     </div>
     {{end}}
+    </div>
   </div>
 
   <div class="grid-4">
@@ -366,8 +380,14 @@ const dashboardHTML = `<!doctype html>
   </div>
 
   <div class="grid-2">
-    <div class="card">
-      <h2>命中类别<span class="sub">按脱敏类型</span></h2>
+    <div class="card" data-fold="kinds">
+      <div class="card-head">
+        <button class="fold-btn" type="button" aria-expanded="true">
+          <span class="fold-arrow" aria-hidden="true"></span>
+          <span class="fold-label">命中类别 <span class="sub">按脱敏类型</span></span>
+        </button>
+      </div>
+      <div class="card-body">
       {{if .KindBars}}
       <div class="bar-list">
         {{range .KindBars}}
@@ -383,10 +403,17 @@ const dashboardHTML = `<!doctype html>
       {{else}}
       <div class="empty">暂无命中记录</div>
       {{end}}
+      </div>
     </div>
 
-    <div class="card">
-      <h2>检出方式<span class="sub">按识别来源</span></h2>
+    <div class="card" data-fold="finders">
+      <div class="card-head">
+        <button class="fold-btn" type="button" aria-expanded="true">
+          <span class="fold-arrow" aria-hidden="true"></span>
+          <span class="fold-label">检出方式 <span class="sub">按识别来源</span></span>
+        </button>
+      </div>
+      <div class="card-body">
       {{if .FinderBars}}
       <div class="bar-list">
         {{range .FinderBars}}
@@ -402,12 +429,19 @@ const dashboardHTML = `<!doctype html>
       {{else}}
       <div class="empty">暂无检出记录</div>
       {{end}}
+      </div>
     </div>
   </div>
 
   <div class="grid-2">
-    <div class="card">
-      <h2>协议统计</h2>
+    <div class="card" data-fold="protocols">
+      <div class="card-head">
+        <button class="fold-btn" type="button" aria-expanded="true">
+          <span class="fold-arrow" aria-hidden="true"></span>
+          <span class="fold-label">协议统计</span>
+        </button>
+      </div>
+      <div class="card-body">
       {{if .ProtocolRows}}
       <table>
         <thead><tr><th>协议</th><th>请求</th><th>脱敏 / 拦截</th><th>命中</th><th>还原</th><th>入站</th></tr></thead>
@@ -427,10 +461,17 @@ const dashboardHTML = `<!doctype html>
       {{else}}
       <div class="empty">暂无请求数据</div>
       {{end}}
+      </div>
     </div>
 
-    <div class="card">
-      <h2>模型统计</h2>
+    <div class="card" data-fold="models">
+      <div class="card-head">
+        <button class="fold-btn" type="button" aria-expanded="true">
+          <span class="fold-arrow" aria-hidden="true"></span>
+          <span class="fold-label">模型统计</span>
+        </button>
+      </div>
+      <div class="card-body">
       {{if .ModelRows}}
       <table>
         <thead><tr><th>模型</th><th>请求</th><th>脱敏 / 拦截</th><th>命中</th><th>还原</th><th>入站</th></tr></thead>
@@ -450,22 +491,27 @@ const dashboardHTML = `<!doctype html>
       {{else}}
       <div class="empty">暂无模型数据</div>
       {{end}}
+      </div>
     </div>
   </div>
 
-  <div class="card">
-    <h2>
-      <span>最近过滤记录 <span class="sub">仅保留前缀提示与占位符，不保存明文</span></span>
+  <div class="card" data-fold="events">
+    <div class="card-head">
+      <button class="fold-btn" type="button" aria-expanded="true">
+        <span class="fold-arrow" aria-hidden="true"></span>
+        <span class="fold-label">最近过滤记录 <span class="sub">仅保留前缀提示与占位符，不保存明文 · 共 {{len .Status.RecentEvents}} 条</span></span>
+      </button>
       <span class="actions">
-        <a class="btn {{if eq .ActionFilter ""}}active{{end}}" href="{{.BaseURL}}">全部</a>
-        <a class="btn {{if eq .ActionFilter "mask"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=mask">脱敏</a>
-        <a class="btn {{if eq .ActionFilter "warn"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=warn">告警</a>
-        <a class="btn {{if eq .ActionFilter "block"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=block">拦截</a>
-        <a class="btn {{if eq .ActionFilter "restore"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=restore">还原</a>
-        <a class="btn {{if eq .ActionFilter "passthrough"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=passthrough">放行</a>
-        <a class="btn {{if eq .ActionFilter "error"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=error">错误</a>
+        <a class="btn {{if eq .ActionFilter ""}}active{{end}}" href="{{.BaseURL}}" onclick="setCardFold('events',false)">全部</a>
+        <a class="btn {{if eq .ActionFilter "mask"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=mask" onclick="setCardFold('events',false)">脱敏</a>
+        <a class="btn {{if eq .ActionFilter "warn"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=warn" onclick="setCardFold('events',false)">告警</a>
+        <a class="btn {{if eq .ActionFilter "block"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=block" onclick="setCardFold('events',false)">拦截</a>
+        <a class="btn {{if eq .ActionFilter "restore"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=restore" onclick="setCardFold('events',false)">还原</a>
+        <a class="btn {{if eq .ActionFilter "passthrough"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=passthrough" onclick="setCardFold('events',false)">放行</a>
+        <a class="btn {{if eq .ActionFilter "error"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=error" onclick="setCardFold('events',false)">错误</a>
       </span>
-    </h2>
+    </div>
+    <div class="card-body">
     {{if .HasEvents}}
     <div style="overflow-x:auto">
       <table>
@@ -516,11 +562,15 @@ const dashboardHTML = `<!doctype html>
     {{else}}
     <div class="empty">暂无记录</div>
     {{end}}
+    </div>
   </div>
 
-  <div class="card">
-    <h2>
-      <span>调试抓包 <span class="sub">临时内存开关（支持 TTL 自动关闭），对比原始请求、脱敏报文与响应还原</span></span>
+  <div class="card" data-fold="capture">
+    <div class="card-head">
+      <button class="fold-btn" type="button" aria-expanded="true">
+        <span class="fold-arrow" aria-hidden="true"></span>
+        <span class="fold-label">调试抓包 <span class="sub">临时内存开关（支持 TTL 自动关闭），对比原始请求、脱敏报文与响应还原</span></span>
+      </button>
       <span class="actions">
         <span id="cap-badge" class="badge badge-muted">未加载</span>
         <select id="cap-ttl" class="select" title="抓包有效期">
@@ -530,23 +580,32 @@ const dashboardHTML = `<!doctype html>
           <option value="1800">30 分钟</option>
         </select>
         <button id="cap-toggle-btn" class="btn" type="button" onclick="toggleCapture()">开启抓包</button>
-        <button class="btn" type="button" onclick="loadCapture()">刷新抓包</button>
+        <button class="btn" type="button" onclick="loadCapture(true)">刷新抓包</button>
         <button class="btn" type="button" onclick="clearCapture()">清空记录</button>
       </span>
-    </h2>
+    </div>
+    <div class="card-body">
     <div class="sub">curl 接口：<span class="mono">{{.DebugCaptureURL}}</span></div>
     <div id="cap-err" class="err-box" style="display:none"></div>
     <div id="cap-list" class="cap-list"><div class="empty">点击「刷新抓包」或「开启抓包」加载调试捕获</div></div>
+    </div>
   </div>
 
-  <div class="card">
-    <h2>脱敏预览 <span class="sub">只读测试，不计入统计或还原映射</span></h2>
+  <div class="card" data-fold="preview">
+    <div class="card-head">
+      <button class="fold-btn" type="button" aria-expanded="true">
+        <span class="fold-arrow" aria-hidden="true"></span>
+        <span class="fold-label">脱敏预览 <span class="sub">只读测试，不计入统计或还原映射</span></span>
+      </button>
+    </div>
+    <div class="card-body">
     <textarea id="preview-input" placeholder="输入测试文本（例如：Authorization: Bearer sk-ant-api03-example1234567890, contact alice@example.com）"></textarea>
     <div class="actions" style="margin-top:8px">
       <button class="btn" type="button" onclick="runPreview()">测试</button>
       <span id="preview-meta" class="sub"></span>
     </div>
     <div id="preview-out" class="preview-out"></div>
+    </div>
   </div>
 </div>
 <script>
@@ -643,9 +702,13 @@ async function callCapture(method, body){
     errEl.textContent = '请求失败: ' + e;
   }
 }
-function loadCapture(){ return callCapture('GET'); }
+function loadCapture(unfold){
+  if(unfold) setCardFold('capture', false);
+  return callCapture('GET');
+}
 function toggleCapture(){
   if(capState.enabled){ return callCapture('POST', {enabled: false}); }
+  setCardFold('capture', false);
   var ttl = parseInt(document.getElementById('cap-ttl').value || '300', 10);
   return callCapture('POST', {enabled: true, ttl_seconds: ttl});
 }
@@ -684,6 +747,44 @@ async function runPreview(){
     meta.textContent='';
   }
 }
+var FOLD_STORAGE = 'cpa_reductant_collapsed_cards';
+function readFoldState(){
+  try{
+    var raw = localStorage.getItem(FOLD_STORAGE);
+    return raw ? (JSON.parse(raw) || {}) : {};
+  }catch(_){ return {}; }
+}
+function writeFoldState(map){
+  try{ localStorage.setItem(FOLD_STORAGE, JSON.stringify(map)); }catch(_){}
+}
+function applyCardFold(card, collapsed){
+  if(!card) return;
+  card.classList.toggle('collapsed', !!collapsed);
+  var btn = card.querySelector('.fold-btn');
+  if(btn) btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+}
+function setCardFold(id, collapsed){
+  var card = document.querySelector('[data-fold="' + id + '"]');
+  applyCardFold(card, collapsed);
+  var map = readFoldState();
+  if(collapsed) map[id] = true;
+  else delete map[id];
+  writeFoldState(map);
+}
+function initCardFolds(){
+  var map = readFoldState();
+  Array.prototype.forEach.call(document.querySelectorAll('[data-fold]'), function(card){
+    var id = card.getAttribute('data-fold');
+    applyCardFold(card, !!map[id]);
+    var btn = card.querySelector('.fold-btn');
+    if(btn){
+      btn.onclick = function(){
+        setCardFold(id, !card.classList.contains('collapsed'));
+      };
+    }
+  });
+}
+initCardFolds();
 </script>
 </body>
 </html>
@@ -756,14 +857,18 @@ body.embedded .auth-wrap{margin-top:12px}
     <div id="runtime-errors"></div>
   </div>
 
-  <div class="card">
-    <h2>
-      <span>本地 PII 模型 <span class="sub">用于识别人名、地址、电话等语义实体（独立于顶层 models 白名单）</span></span>
+  <div class="card" data-fold="model">
+    <div class="card-head">
+      <button class="fold-btn" type="button" aria-expanded="true">
+        <span class="fold-arrow" aria-hidden="true"></span>
+        <span class="fold-label">本地 PII 模型 <span class="sub">用于识别人名、地址、电话等语义实体（独立于顶层 models 白名单）</span></span>
+      </button>
       <span class="actions">
         <span id="model-status-badge" class="badge badge-muted">加载中</span>
         <button id="model-download-btn" class="btn hidden" type="button" onclick="downloadModelWeights()">立即下载权重</button>
       </span>
-    </h2>
+    </div>
+    <div class="card-body">
     <div id="model-details" class="kv-grid"></div>
     <div id="model-progress" class="hidden" style="margin-top:10px"></div>
     <div id="model-notice"></div>
@@ -771,43 +876,80 @@ body.embedded .auth-wrap{margin-top:12px}
       <summary>配置与默认目录说明（点击展开）</summary>
       <div id="model-guide-body"></div>
     </details>
+    </div>
   </div>
 
   <div id="kpi-grid" class="grid-4"></div>
 
   <div class="grid-2">
-    <div class="card">
-      <h2>命中类别<span class="sub">按脱敏类型</span></h2>
-      <div id="kind-bars"></div>
+    <div class="card" data-fold="kinds">
+      <div class="card-head">
+        <button class="fold-btn" type="button" aria-expanded="true">
+          <span class="fold-arrow" aria-hidden="true"></span>
+          <span class="fold-label">命中类别 <span class="sub">按脱敏类型</span></span>
+        </button>
+      </div>
+      <div class="card-body">
+        <div id="kind-bars"></div>
+      </div>
     </div>
-    <div class="card">
-      <h2>检出方式<span class="sub">按识别来源</span></h2>
-      <div id="finder-bars"></div>
+    <div class="card" data-fold="finders">
+      <div class="card-head">
+        <button class="fold-btn" type="button" aria-expanded="true">
+          <span class="fold-arrow" aria-hidden="true"></span>
+          <span class="fold-label">检出方式 <span class="sub">按识别来源</span></span>
+        </button>
+      </div>
+      <div class="card-body">
+        <div id="finder-bars"></div>
+      </div>
     </div>
   </div>
 
   <div class="grid-2">
-    <div class="card">
-      <h2>协议统计</h2>
-      <div id="protocol-table"></div>
+    <div class="card" data-fold="protocols">
+      <div class="card-head">
+        <button class="fold-btn" type="button" aria-expanded="true">
+          <span class="fold-arrow" aria-hidden="true"></span>
+          <span class="fold-label">协议统计</span>
+        </button>
+      </div>
+      <div class="card-body">
+        <div id="protocol-table"></div>
+      </div>
     </div>
-    <div class="card">
-      <h2>模型统计</h2>
-      <div id="model-table"></div>
+    <div class="card" data-fold="models">
+      <div class="card-head">
+        <button class="fold-btn" type="button" aria-expanded="true">
+          <span class="fold-arrow" aria-hidden="true"></span>
+          <span class="fold-label">模型统计</span>
+        </button>
+      </div>
+      <div class="card-body">
+        <div id="model-table"></div>
+      </div>
     </div>
   </div>
 
-  <div class="card">
-    <h2>
-      <span>最近过滤记录 <span class="sub">仅保留前缀提示与占位符，不保存明文</span></span>
+  <div class="card" data-fold="events">
+    <div class="card-head">
+      <button class="fold-btn" type="button" aria-expanded="true">
+        <span class="fold-arrow" aria-hidden="true"></span>
+        <span class="fold-label">最近过滤记录 <span class="sub">仅保留前缀提示与占位符，不保存明文<span id="events-count"></span></span></span>
+      </button>
       <span id="event-filters" class="actions"></span>
-    </h2>
-    <div id="events-table"></div>
+    </div>
+    <div class="card-body">
+      <div id="events-table"></div>
+    </div>
   </div>
 
-  <div class="card">
-    <h2>
-      <span>调试抓包 <span class="sub">临时内存开关（支持 TTL 自动关闭），对比原始请求、脱敏报文与响应还原</span></span>
+  <div class="card" data-fold="capture">
+    <div class="card-head">
+      <button class="fold-btn" type="button" aria-expanded="true">
+        <span class="fold-arrow" aria-hidden="true"></span>
+        <span class="fold-label">调试抓包 <span class="sub">临时内存开关（支持 TTL 自动关闭），对比原始请求、脱敏报文与响应还原</span></span>
+      </button>
       <span class="actions">
         <span id="cap-badge" class="badge badge-muted">已关闭</span>
         <select id="cap-ttl" class="select" title="抓包有效期">
@@ -817,23 +959,32 @@ body.embedded .auth-wrap{margin-top:12px}
           <option value="1800">30 分钟</option>
         </select>
         <button id="cap-toggle-btn" class="btn" type="button" onclick="toggleCapture()">开启抓包</button>
-        <button class="btn" type="button" onclick="loadCapture()">刷新抓包</button>
+        <button class="btn" type="button" onclick="loadCapture(true)">刷新抓包</button>
         <button class="btn" type="button" onclick="clearCapture()">清空记录</button>
       </span>
-    </h2>
-    <div class="sub">支持 <span class="mono">curl</span> 调用：<span class="mono">/v0/management/cpa-reductant/debug/capture</span>（GET 查看 / POST 开关 / DELETE 清空）</div>
-    <div id="cap-err" class="err-box hidden"></div>
-    <div id="cap-list" class="cap-list"><div class="empty">抓包未开启</div></div>
+    </div>
+    <div class="card-body">
+      <div class="sub">支持 <span class="mono">curl</span> 调用：<span class="mono">/v0/management/cpa-reductant/debug/capture</span>（GET 查看 / POST 开关 / DELETE 清空）</div>
+      <div id="cap-err" class="err-box hidden"></div>
+      <div id="cap-list" class="cap-list"><div class="empty">抓包未开启</div></div>
+    </div>
   </div>
 
-  <div class="card">
-    <h2>脱敏预览 <span class="sub">只读测试，不计入统计或还原映射</span></h2>
-    <textarea id="preview-input" placeholder="输入测试文本（例如：Authorization: Bearer sk-ant-api03-example1234567890, contact alice@example.com）"></textarea>
-    <div class="actions" style="margin-top:8px">
-      <button class="btn" type="button" onclick="runPreview()">测试</button>
-      <span id="preview-meta" class="sub"></span>
+  <div class="card" data-fold="preview">
+    <div class="card-head">
+      <button class="fold-btn" type="button" aria-expanded="true">
+        <span class="fold-arrow" aria-hidden="true"></span>
+        <span class="fold-label">脱敏预览 <span class="sub">只读测试，不计入统计或还原映射</span></span>
+      </button>
     </div>
-    <div id="preview-out" class="preview-out"></div>
+    <div class="card-body">
+      <textarea id="preview-input" placeholder="输入测试文本（例如：Authorization: Bearer sk-ant-api03-example1234567890, contact alice@example.com）"></textarea>
+      <div class="actions" style="margin-top:8px">
+        <button class="btn" type="button" onclick="runPreview()">测试</button>
+        <span id="preview-meta" class="sub"></span>
+      </div>
+      <div id="preview-out" class="preview-out"></div>
+    </div>
   </div>
 </div>
 
@@ -1110,11 +1261,14 @@ body.embedded .auth-wrap{margin-top:12px}
     Array.prototype.forEach.call(document.querySelectorAll('#event-filters button'), function(btn){
       btn.onclick = function(){
         state.actionFilter = btn.getAttribute('data-action') || '';
+        setCardFold('events', false);
         loadStatus();
       };
     });
 
     var events = st.recent_events || [];
+    var countEl = document.getElementById('events-count');
+    if(countEl) countEl.textContent = ' · 共 ' + events.length + ' 条';
     var evEl = document.getElementById('events-table');
     if(!events.length){
       evEl.innerHTML = '<div class="empty">暂无记录</div>';
@@ -1426,9 +1580,13 @@ body.embedded .auth-wrap{margin-top:12px}
     }
   }
 
-  window.loadCapture = function(){ return callCapture('GET'); };
+  window.loadCapture = function(unfold){
+    if(unfold) setCardFold('capture', false);
+    return callCapture('GET');
+  };
   window.toggleCapture = function(){
     if(state.captureEnabled){ return callCapture('POST', {enabled: false}); }
+    setCardFold('capture', false);
     var ttl = parseInt(document.getElementById('cap-ttl').value || '300', 10);
     return callCapture('POST', {enabled: true, ttl_seconds: ttl});
   };
@@ -1483,6 +1641,45 @@ body.embedded .auth-wrap{margin-top:12px}
     try{ sessionStorage.setItem(KEY_STORAGE, val); }catch(_){}
     window.loadStatus();
   };
+
+  var FOLD_STORAGE = 'cpa_reductant_collapsed_cards';
+  function readFoldState(){
+    try{
+      var raw = localStorage.getItem(FOLD_STORAGE);
+      return raw ? (JSON.parse(raw) || {}) : {};
+    }catch(_){ return {}; }
+  }
+  function writeFoldState(map){
+    try{ localStorage.setItem(FOLD_STORAGE, JSON.stringify(map)); }catch(_){}
+  }
+  function applyCardFold(card, collapsed){
+    if(!card) return;
+    card.classList.toggle('collapsed', !!collapsed);
+    var btn = card.querySelector('.fold-btn');
+    if(btn) btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  }
+  function setCardFold(id, collapsed){
+    var card = document.querySelector('[data-fold="' + id + '"]');
+    applyCardFold(card, collapsed);
+    var map = readFoldState();
+    if(collapsed) map[id] = true;
+    else delete map[id];
+    writeFoldState(map);
+  }
+  function initCardFolds(){
+    var map = readFoldState();
+    Array.prototype.forEach.call(document.querySelectorAll('[data-fold]'), function(card){
+      var id = card.getAttribute('data-fold');
+      applyCardFold(card, !!map[id]);
+      var btn = card.querySelector('.fold-btn');
+      if(btn){
+        btn.onclick = function(){
+          setCardFold(id, !card.classList.contains('collapsed'));
+        };
+      }
+    });
+  }
+  initCardFolds();
 
   try{
     var saved = sessionStorage.getItem(KEY_STORAGE);
