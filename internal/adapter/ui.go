@@ -74,7 +74,8 @@ var dashboardTmpl = template.Must(template.New("dashboard").Funcs(template.FuncM
 		}
 		return fmt.Sprintf("%.1f ms", v)
 	},
-	"fmtBytes": formatBytes,
+	"fmtBytes":   formatBytes,
+	"fmtBytes64": formatBytes64,
 	"containsQ": func(s string) bool {
 		return strings.Contains(s, "?")
 	},
@@ -208,7 +209,15 @@ textarea{width:100%;min-height:76px;padding:10px;border-radius:8px;border:1px so
 .diff-title{font-size:12px;font-weight:600;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
 .code-box{margin:0;padding:10px;border-radius:8px;background:var(--bg);border:1px solid var(--border);font:12px/1.45 var(--mono);white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto}
 .orig-val{color:var(--red);font-weight:600;word-break:break-all}
-.ph-val{color:var(--blue);word-break:break-all}`
+.ph-val{color:var(--blue);word-break:break-all}
+.warn-box{margin-top:8px;padding:8px 10px;border-radius:6px;background:var(--amber-bg);color:var(--amber);font-size:12px}
+.kv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;margin-top:10px}
+.kv-item{padding:8px 10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12px}
+.kv-label{color:var(--muted);font-size:11px;margin-bottom:2px}
+.kv-val{font-family:var(--mono);word-break:break-all}
+.guide-box{margin-top:10px;padding:10px 12px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12px}
+.guide-box summary{cursor:pointer;font-weight:600;color:var(--text)}
+.guide-box .code-box{margin-top:8px}`
 
 const dashboardHTML = `<!doctype html>
 <html lang="zh-CN">
@@ -272,6 +281,31 @@ const dashboardHTML = `<!doctype html>
     {{if .Status.Model.LastError}}<div class="err-box">模型错误: {{.Status.Model.LastError}}{{if .Status.Model.RetryAt}}（退避至 {{.Status.Model.RetryAt}}）{{end}}</div>{{end}}
     {{if .Status.Model.DownloadError}}<div class="err-box">模型下载失败: {{.Status.Model.DownloadError}}</div>{{end}}
     {{if .Status.Model.DiskCacheError}}<div class="err-box">磁盘缓存写入失败: {{.Status.Model.DiskCacheError}}</div>{{end}}
+  </div>
+
+  <div class="card">
+    <h2>
+      <span>本地 PII 模型 ({{.Status.Model.Name}}) <span class="sub">用于识别人名、地址、电话等语义实体</span></span>
+      <span class="actions">
+        {{if not .Status.Model.Enabled}}<span class="badge badge-muted">未启用</span>
+        {{else if .Status.Model.Loaded}}<span class="badge badge-green">已加载 ({{.Status.Model.Cores}} 核)</span>
+        {{else if .Status.Model.Downloading}}<span class="badge badge-amber">下载中 ({{printf "%.0f" .DownloadPercent}}%)</span>
+        {{else if .Status.Model.Installed}}<span class="badge badge-blue">权重就绪</span>
+        {{else}}<span class="badge badge-amber">缺失权重</span>{{end}}
+      </span>
+    </h2>
+    <div class="kv-grid">
+      <div class="kv-item"><div class="kv-label">期望目录 (model.dir)</div><div class="kv-val">{{if .Status.Model.Dir}}{{.Status.Model.Dir}}{{else}}-{{end}}</div></div>
+      <div class="kv-item"><div class="kv-label">实际加载路径 / 布局</div><div class="kv-val">{{if .Status.Model.ResolvedDir}}{{.Status.Model.ResolvedDir}} ({{.Status.Model.Layout}}){{else}}{{.Status.Model.Layout}}{{end}}</div></div>
+      <div class="kv-item"><div class="kv-label">策略开关</div><div class="kv-val">enabled={{.Status.Model.Enabled}} · auto_download={{.Status.Model.AutoDownload}} · strict={{.Status.Model.Strict}}</div></div>
+      <div class="kv-item"><div class="kv-label">阈值 / 超时 / 版本</div><div class="kv-val">min_score={{.Status.Model.MinScore}} · wait={{.Status.Model.WaitMS}}ms · rev={{.Status.Model.Revision}}</div></div>
+    </div>
+    {{if .Status.Model.Downloading}}
+    <div style="margin-top:10px">
+      <div class="bar-head"><span class="sub">正在拉取权重</span><span class="mono">{{fmtBytes64 .Status.Model.DownloadDone}} / {{fmtBytes64 .Status.Model.DownloadTotal}} ({{printf "%.1f" .DownloadPercent}}%)</span></div>
+      <div class="bar-track" style="margin-top:4px"><div class="bar-fill" style="width:{{printf "%.1f" .DownloadPercent}}%"></div></div>
+    </div>
+    {{end}}
   </div>
 
   <div class="grid-4">
@@ -722,6 +756,23 @@ body.embedded .auth-wrap{margin-top:12px}
     <div id="runtime-errors"></div>
   </div>
 
+  <div class="card">
+    <h2>
+      <span>本地 PII 模型 <span class="sub">用于识别人名、地址、电话等语义实体（独立于顶层 models 白名单）</span></span>
+      <span class="actions">
+        <span id="model-status-badge" class="badge badge-muted">加载中</span>
+        <button id="model-download-btn" class="btn hidden" type="button" onclick="downloadModelWeights()">立即下载权重</button>
+      </span>
+    </h2>
+    <div id="model-details" class="kv-grid"></div>
+    <div id="model-progress" class="hidden" style="margin-top:10px"></div>
+    <div id="model-notice"></div>
+    <details id="model-guide" class="guide-box">
+      <summary>配置与默认目录说明（点击展开）</summary>
+      <div id="model-guide-body"></div>
+    </details>
+  </div>
+
   <div id="kpi-grid" class="grid-4"></div>
 
   <div class="grid-2">
@@ -799,6 +850,7 @@ body.embedded .auth-wrap{margin-top:12px}
   var STATUS_URL = '/v0/management/cpa-reductant/status';
   var PREVIEW_URL = '/v0/management/cpa-reductant/preview';
   var DEBUG_CAPTURE_URL = '/v0/management/cpa-reductant/debug/capture';
+  var MODEL_DOWNLOAD_URL = '/v0/management/cpa-reductant/model/download';
   var FINDER_META = {rule:'内置规则',yours:'自定义规则',word:'词表',model:'本地模型',known:'关联匹配'};
   var ACTION_FILTERS = [['','全部'],['mask','脱敏'],['warn','告警'],['block','拦截'],['restore','还原'],['passthrough','放行'],['error','错误']];
 
@@ -806,9 +858,11 @@ body.embedded .auth-wrap{margin-top:12px}
     key: '',
     actionFilter: '',
     autoTimer: null,
+    dlPollTimer: null,
     lastStatus: null,
     captureEnabled: false,
-    openCaptures: {}
+    openCaptures: {},
+    modelGuideInit: false
   };
 
   function esc(v){
@@ -899,7 +953,7 @@ body.embedded .auth-wrap{margin-top:12px}
       if(m.last_error || m.download_error) return ['模型异常（规则兜底）','badge-red'];
       if(m.downloading) return ['模型下载中','badge-amber'];
       if(m.behind) return ['模型繁忙（超时降级）','badge-amber'];
-      if(!m.installed) return ['等待模型文件','badge-amber'];
+      if(!m.installed) return [m.strict ? '缺失权重（strict 将拒载）' : '缺失权重（仅规则运行）','badge-amber'];
     }
     if((s.requests_total || 0) > 0) return ['运行中','badge-green'];
     return ['空闲','badge-blue'];
@@ -907,6 +961,7 @@ body.embedded .auth-wrap{margin-top:12px}
 
   function showAuth(msg){
     stopAutoRefresh();
+    stopDownloadPoll();
     state.key = '';
     try{ sessionStorage.removeItem(KEY_STORAGE); }catch(_){}
     document.getElementById('app').classList.add('hidden');
@@ -1012,6 +1067,8 @@ body.embedded .auth-wrap{margin-top:12px}
       return '<div class="err-box">' + esc(e) + '</div>';
     }).join('');
 
+    renderModelCard(m);
+
     var s = st.stats || {};
     var ml = s.mask_latency_ms || {};
     var rl = s.restore_latency_ms || {};
@@ -1094,6 +1151,117 @@ body.embedded .auth-wrap{margin-top:12px}
         '</tr>';
       }).join('') + '</tbody></table></div>';
   }
+
+  function renderModelCard(m){
+    m = m || {};
+    var dlTotal = Number(m.download_total || 0);
+    var dlDone = Number(m.download_done || 0);
+    var dlPct = dlTotal > 0 ? Math.min(100, (dlDone * 100) / dlTotal) : 0;
+
+    var badge = document.getElementById('model-status-badge');
+    if(!m.enabled){
+      badge.className = 'badge badge-muted';
+      badge.textContent = m.installed ? '未启用（权重已就绪）' : '未启用';
+    } else if(m.loaded){
+      badge.className = 'badge badge-green';
+      badge.textContent = esc(m.name || 'astrlink-guard') + ' · 已加载 (' + (m.cores || 0) + ' 核)';
+    } else if(m.downloading){
+      badge.className = 'badge badge-amber';
+      badge.textContent = '下载中 ' + dlPct.toFixed(0) + '%';
+    } else if(m.installed){
+      badge.className = 'badge badge-blue';
+      badge.textContent = esc(m.name || 'astrlink-guard') + ' · 权重就绪（按需加载）';
+    } else {
+      badge.className = m.strict ? 'badge badge-red' : 'badge badge-amber';
+      badge.textContent = m.strict ? '缺失权重（strict 将返回 503）' : '缺失权重（降级为规则）';
+    }
+
+    var dlBtn = document.getElementById('model-download-btn');
+    dlBtn.classList.toggle('hidden', !(!m.installed && !m.downloading));
+    dlBtn.textContent = m.download_error ? '重试下载权重' : '立即下载权重';
+
+    document.getElementById('model-details').innerHTML = [
+      ['模型目录 (model.dir)', m.dir || '(未解析到缓存目录，请设 model.dir 或 CPA_REDUCTANT_MODEL_DIR)'],
+      ['实际加载路径 / 布局', m.resolved_dir ? (m.resolved_dir + ' (' + (m.layout || '-') + ')') : (m.layout || 'missing')],
+      ['策略开关', 'enabled=' + (!!m.enabled) + ' · auto_download=' + (!!m.auto_download) + ' · strict=' + (!!m.strict)],
+      ['阈值 / 超时 / Revision', 'min_score=' + (m.min_score || 0.8) + ' · wait=' + (m.wait_ms || 2000) + 'ms · rev=' + (m.revision || '-')]
+    ].map(function(kv){
+      return '<div class="kv-item"><div class="kv-label">' + esc(kv[0]) + '</div><div class="kv-val">' + esc(kv[1]) + '</div></div>';
+    }).join('');
+
+    var progEl = document.getElementById('model-progress');
+    if(m.downloading){
+      progEl.classList.remove('hidden');
+      progEl.innerHTML = '<div class="bar-head"><span class="sub">正在拉取 AstrLink Guard int8 权重（支持断点续传与 hf-mirror 自动回退）</span>' +
+        '<span class="mono">' + fmtBytes(dlDone) + ' / ' + fmtBytes(dlTotal) + ' (' + dlPct.toFixed(1) + '%)</span></div>' +
+        '<div class="bar-track" style="margin-top:4px"><div class="bar-fill" style="width:' + dlPct.toFixed(1) + '%"></div></div>';
+      startDownloadPoll();
+    } else {
+      progEl.classList.add('hidden');
+      progEl.innerHTML = '';
+      stopDownloadPoll();
+    }
+
+    var noticeEl = document.getElementById('model-notice');
+    if(m.enabled && !m.installed && !m.downloading){
+      noticeEl.innerHTML = '<div class="warn-box">模型已启用但本地尚无权重文件。' +
+        (m.auto_download ? '如后台下载失败，可检查网络/代理后点击「重试下载权重」。' : '当前配置 auto_download=false，可点击「立即下载权重」或手动将权重放入上述目录。') +
+        '</div>';
+    } else {
+      noticeEl.innerHTML = '';
+    }
+
+    var dirHint = m.dir || '~/.cache/cpa-reductant/models/astrlink-guard';
+    var yamlSnippet = 'plugins:\n  configs:\n    cpa-reductant:\n      enabled: true\n      model:\n        enabled: true\n        # dir: ' + dirHint;
+    document.getElementById('model-guide-body').innerHTML =
+      '<div class="sub" style="margin-top:8px">1. <strong>在线启用（最小配置）</strong>：在 CPA <span class="mono">config.yaml</span> 中设 <span class="mono">model.enabled: true</span> 即可自动后台拉取权重（除非显式设 <span class="mono">auto_download: false</span>）。注意顶层 <span class="mono">models</span> 是上游 LLM 过滤名单，不是本地 PII 模型开关。</div>' +
+      '<pre class="code-box">' + esc(yamlSnippet) + '</pre>' +
+      '<div class="sub" style="margin-top:8px">2. <strong>默认目录与离线部署</strong>：<span class="mono">model.dir</span> 默认读取 <span class="mono">CPA_REDUCTANT_MODEL_DIR</span> 或系统缓存目录（Linux 为 <span class="mono">~/.cache/cpa-reductant/models/astrlink-guard</span>）。离线时从 <span class="mono">QuantumNous/astrlink-guard</span>（rev <span class="mono">' + esc(m.revision || '7216b6a3b897') + '</span>）下载 <span class="mono">int8/</span> 下的 <span class="mono">model_int8.onnx</span>、<span class="mono">model_int8.onnx_data</span>、<span class="mono">tokenizer.json</span> 平铺放入即可。</div>';
+    if(!state.modelGuideInit){
+      state.modelGuideInit = true;
+      if(!m.enabled && !m.installed){
+        document.getElementById('model-guide').open = true;
+      }
+    }
+  }
+
+  function startDownloadPoll(){
+    if(state.dlPollTimer || !state.key) return;
+    state.dlPollTimer = setInterval(window.loadStatus, 1500);
+  }
+
+  function stopDownloadPoll(){
+    if(state.dlPollTimer){
+      clearInterval(state.dlPollTimer);
+      state.dlPollTimer = null;
+    }
+  }
+
+  window.downloadModelWeights = async function(){
+    if(!state.key) return;
+    try{
+      var resp = await fetch(MODEL_DOWNLOAD_URL, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + state.key,
+          'Content-Type': 'application/json'
+        },
+        body: '{}'
+      });
+      if(resp.status === 401 || resp.status === 403){
+        showAuth('管理密钥无效或无权限 (HTTP ' + resp.status + ')');
+        return;
+      }
+      var data = await resp.json();
+      if(!resp.ok){
+        document.getElementById('model-notice').innerHTML = '<div class="err-box">' + esc(data.error || ('HTTP ' + resp.status)) + '</div>';
+        return;
+      }
+      await window.loadStatus();
+    }catch(e){
+      document.getElementById('model-notice').innerHTML = '<div class="err-box">触发下载失败: ' + esc(e) + '</div>';
+    }
+  };
 
   window.loadStatus = async function(){
     if(!state.key) return;
@@ -1404,7 +1572,10 @@ func deriveHealth(st engine.Status) (string, string) {
 			return "模型繁忙（超时降级）", "badge-amber"
 		}
 		if !st.Model.Installed {
-			return "等待模型文件", "badge-amber"
+			if st.Model.Strict {
+				return "缺失权重（strict 将拒载）", "badge-amber"
+			}
+			return "缺失权重（仅规则运行）", "badge-amber"
 		}
 	}
 	if st.Stats.RequestsTotal > 0 {
@@ -1495,12 +1666,16 @@ func formatDurationSec(sec int64) string {
 }
 
 func formatBytes(b int) string {
+	return formatBytes64(int64(b))
+}
+
+func formatBytes64(b int64) string {
 	if b < 1024 {
 		return fmt.Sprintf("%d B", b)
 	}
 	const unit = 1024
 	div, exp := int64(unit), 0
-	for n := int64(b) / unit; n >= unit && exp < 3; n /= unit {
+	for n := b / unit; n >= unit && exp < 3; n /= unit {
 		div *= unit
 		exp++
 	}

@@ -78,6 +78,9 @@ model:
 	if cfg.Model.EffectiveWait().Milliseconds() != DefaultModelStrictWaitMS {
 		t.Fatalf("wait = %v, want %dms", cfg.Model.EffectiveWait(), DefaultModelStrictWaitMS)
 	}
+	if !cfg.Model.EffectiveAutoDownload() {
+		t.Fatal("expected auto_download to default to true")
+	}
 
 	explicit, err := Parse([]byte(`
 model:
@@ -86,13 +89,13 @@ model:
   dir: /opt/models/guard/
   min_score: 0.65
   wait_ms: 4500
-  auto_download: true
+  auto_download: false
   mirror: https://hf-mirror.com
 `))
 	if err != nil {
 		t.Fatalf("parse explicit model config: %v", err)
 	}
-	if !explicit.Model.AutoDownload || explicit.Model.Mirror != "https://hf-mirror.com" {
+	if explicit.Model.EffectiveAutoDownload() || explicit.Model.Mirror != "https://hf-mirror.com" {
 		t.Fatalf("unexpected download settings: %+v", explicit.Model)
 	}
 	if explicit.Model.EffectiveDir() != "/opt/models/guard" {

@@ -97,16 +97,19 @@ func TestMaskJSONWithModelAndRestore(t *testing.T) {
 
 func TestModelStrictAndDegradeAndPanicSafety(t *testing.T) {
 	missingDir := filepath.Join(t.TempDir(), "nonexistent")
+	autoDownloadFalse := false
 
 	// Non-strict mode degrades gracefully to rules when model files are missing.
 	engLenient := New(&config.Config{
 		Words: []string{"LOCAL-WORD"},
 		Model: config.ModelConfig{
-			Enabled: true,
-			Dir:     missingDir,
-			Strict:  false,
+			Enabled:      true,
+			AutoDownload: &autoDownloadFalse,
+			Dir:          missingDir,
+			Strict:       false,
 		},
 	})
+	defer engLenient.Close()
 	req := []byte(`{"messages":[{"role":"user","content":"secret word LOCAL-WORD for Alice Smith"}]}`)
 	masked, err := engLenient.MaskJSON("openai", req)
 	if err != nil {
@@ -119,11 +122,13 @@ func TestModelStrictAndDegradeAndPanicSafety(t *testing.T) {
 	// Strict mode fails closed with ErrModelUnavailable when files are missing.
 	engStrict := New(&config.Config{
 		Model: config.ModelConfig{
-			Enabled: true,
-			Dir:     missingDir,
-			Strict:  true,
+			Enabled:      true,
+			AutoDownload: &autoDownloadFalse,
+			Dir:          missingDir,
+			Strict:       true,
 		},
 	})
+	defer engStrict.Close()
 	if _, err := engStrict.MaskJSON("openai", req); !errors.Is(err, ErrModelUnavailable) {
 		t.Fatalf("expected ErrModelUnavailable in strict mode, got %v", err)
 	}
@@ -759,4 +764,59 @@ func appendBytesField(dst []byte, fieldNum int, b []byte) []byte {
 	dst = binary.AppendUvarint(dst, uint64(fieldNum<<3|2))
 	dst = binary.AppendUvarint(dst, uint64(len(b)))
 	return append(dst, b...)
+}
+
+func TestModelMissingWeightsWarningAndDefaultAutoDownload(t *testing.T) {
+	missingDir := filepath.Join(t.TempDir(), "missing-guard")
+	eng := New(&config.Config{})
+	defer eng.Close()
+
+	var logMsgs []string
+	var logMu sync.Mutex
+	eng.SetLogger(func(level, _, msg string, _ map[string]any) {
+		logMu.Lock()
+		logMsgs = append(logMsgs, level+":"+msg)
+		logMu.Unlock()
+	})
+
+	// Explicit auto_download: false with missing weights emits one warning.
+	autoDownloadFalse := false
+	eng.Update(&config.Config{
+		Model: config.ModelConfig{
+			Enabled:      true,
+			AutoDownload: &autoDownloadFalse,
+			Dir:          missingDir,
+		},
+	})
+	st := eng.ModelStatus()
+	if !st.Enabled || st.AutoDownload || st.Installed || st.Revision == "" {
+		t.Fatalf("unexpected model status with missing weights: %+v", st)
+	}
+	for range 3 {
+		if _, err := eng.MaskJSON("openai", []byte(`{"messages":[{"role":"user","content":"hello"}]}`)); err != nil {
+			t.Fatalf("non-strict MaskJSON should degrade: %v", err)
+		}
+	}
+	logMu.Lock()
+	warnCount := len(logMsgs)
+	logMu.Unlock()
+	if warnCount != 1 {
+		t.Fatalf("expected exactly 1 missing-weights warning, got %d (%v)", warnCount, logMsgs)
+	}
+
+	// When auto_download is omitted, EffectiveAutoDownload defaults to true and installed dir loads cleanly.
+	installedDir := writeMarkerModelDir(t)
+	eng.Update(&config.Config{
+		Model: config.ModelConfig{
+			Enabled: true,
+			Dir:     installedDir,
+		},
+	})
+	st = eng.ModelStatus()
+	if !st.AutoDownload || !st.Installed {
+		t.Fatalf("expected auto_download=true by default and installed=true, got %+v", st)
+	}
+	if dlSt, err := eng.TriggerModelDownload(""); err != nil || !dlSt.Installed {
+		t.Fatalf("expected TriggerModelDownload on installed dir to succeed, st=%+v err=%v", dlSt, err)
+	}
 }

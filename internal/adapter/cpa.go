@@ -18,11 +18,12 @@ import (
 )
 
 const (
-	managementBasePath         = "/v0/management"
-	managementStatusPath       = "/cpa-reductant/status"
-	managementUIPath           = "/cpa-reductant/ui"
-	managementPreviewPath      = "/cpa-reductant/preview"
-	managementDebugCapturePath = "/cpa-reductant/debug/capture"
+	managementBasePath          = "/v0/management"
+	managementStatusPath        = "/cpa-reductant/status"
+	managementUIPath            = "/cpa-reductant/ui"
+	managementPreviewPath       = "/cpa-reductant/preview"
+	managementDebugCapturePath  = "/cpa-reductant/debug/capture"
+	managementModelDownloadPath = "/cpa-reductant/model/download"
 
 	resourceBasePath   = "/v0/resource/plugins/" + config.PluginID
 	resourceUIPath     = "/ui"
@@ -217,6 +218,11 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 					Path:        managementDebugCapturePath,
 					Description: "Clear all in-memory debug capture entries",
 				},
+				{
+					Method:      http.MethodPost,
+					Path:        managementModelDownloadPath,
+					Description: "Trigger async download of local PII model weights into configured model directory",
+				},
 			},
 			Resources: []pluginapi.ResourceRoute{
 				{
@@ -347,6 +353,20 @@ func (p *Plugin) handleManagement(req pluginapi.ManagementRequest) pluginapi.Man
 		return noStoreJSONManagementResponse(http.StatusOK, snap)
 	case method == http.MethodDelete && path == managementDebugCapturePath:
 		return noStoreJSONManagementResponse(http.StatusOK, p.engine.ClearDebugCapture())
+	case method == http.MethodPost && path == managementModelDownloadPath:
+		var body struct {
+			Mirror string `json:"mirror"`
+		}
+		if len(bytes.TrimSpace(req.Body)) > 0 {
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				return noStoreJSONManagementResponse(http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			}
+		}
+		st, err := p.engine.TriggerModelDownload(body.Mirror)
+		if err != nil {
+			return noStoreJSONManagementResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		return noStoreJSONManagementResponse(http.StatusOK, st)
 	default:
 		return jsonManagementResponse(http.StatusNotFound, map[string]string{"error": "route not found"})
 	}

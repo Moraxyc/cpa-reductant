@@ -146,6 +146,14 @@ func (d *modelDownloader) Cancel() {
 }
 
 func (d *modelDownloader) EnsureAsync(dir, mirror string, onReady func()) {
+	d.startAsync(dir, mirror, false, onReady)
+}
+
+func (d *modelDownloader) ForceAsync(dir, mirror string, onReady func()) {
+	d.startAsync(dir, mirror, true, onReady)
+}
+
+func (d *modelDownloader) startAsync(dir, mirror string, force bool, onReady func()) {
 	if dir == "" || modelInstalled(dir) {
 		return
 	}
@@ -154,7 +162,7 @@ func (d *modelDownloader) EnsureAsync(dir, mirror string, onReady func()) {
 		d.mu.Unlock()
 		return
 	}
-	if d.activeDir == dir && !d.lastTriedAt.IsZero() && time.Since(d.lastTriedAt) < downloadRetryWait {
+	if !force && d.activeDir == dir && !d.lastTriedAt.IsZero() && time.Since(d.lastTriedAt) < downloadRetryWait {
 		d.mu.Unlock()
 		return
 	}

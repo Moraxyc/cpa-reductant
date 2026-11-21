@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -812,7 +814,7 @@ func TestModelUnavailableStrictReturns503WithoutUpstream(t *testing.T) {
 	host := newFakeHost(nil)
 	p := NewPlugin(engine.New(nil), host)
 	_, err := p.Dispatch(pluginabi.MethodPluginRegister, mustJSON(t, map[string]any{
-		"config_yaml": []byte("model:\n  enabled: true\n  strict: true\n  dir: " + t.TempDir() + "\n"),
+		"config_yaml": []byte("model:\n  enabled: true\n  auto_download: false\n  strict: true\n  dir: " + t.TempDir() + "\n"),
 	}))
 	if err != nil {
 		t.Fatalf("register: %v", err)
@@ -832,8 +834,8 @@ func TestModelUnavailableStrictReturns503WithoutUpstream(t *testing.T) {
 	if host.count() != 0 {
 		t.Fatalf("expected 0 upstream calls when strict model unavailable, got %d", host.count())
 	}
-	if host.logCount() != 1 {
-		t.Fatalf("expected 1 host.log call on strict unavailable, got %d", host.logCount())
+	if host.logCount() != 2 {
+		t.Fatalf("expected 2 host.log calls (missing weights warning + strict unavailable), got %d", host.logCount())
 	}
 	if _, err := p.Dispatch(pluginabi.MethodPluginShutdown, nil); err != nil {
 		t.Fatalf("shutdown: %v", err)
@@ -859,8 +861,8 @@ func TestManagementStatusAndPreview(t *testing.T) {
 		t.Fatalf("management.register: %v", err)
 	}
 	mgmtReg := routesResp.(pluginapi.ManagementRegistrationResponse)
-	if len(mgmtReg.Routes) != 6 || len(mgmtReg.Resources) != 1 {
-		t.Fatalf("expected 6 authenticated management routes and 1 resource portal route, got routes=%#v resources=%#v", mgmtReg.Routes, mgmtReg.Resources)
+	if len(mgmtReg.Routes) != 7 || len(mgmtReg.Resources) != 1 {
+		t.Fatalf("expected 7 authenticated management routes and 1 resource portal route, got routes=%#v resources=%#v", mgmtReg.Routes, mgmtReg.Resources)
 	}
 	for _, r := range mgmtReg.Routes {
 		if r.Menu != "" {
@@ -1321,5 +1323,57 @@ func TestDebugCaptureStreamingInProgressVisible(t *testing.T) {
 	}
 	if len(finalSnap.Entries) != 1 || finalSnap.Entries[0].Status != "done" || !strings.Contains(finalSnap.Entries[0].RestoredResponse, "tail") {
 		t.Fatalf("expected final done capture with tail chunk, got %+v", finalSnap)
+	}
+}
+
+func TestManagementModelDownloadRoute(t *testing.T) {
+	modelDir := t.TempDir()
+	for _, name := range []string{"model_int8.onnx", "model_int8.onnx_data", "tokenizer.json"} {
+		if err := os.WriteFile(filepath.Join(modelDir, name), []byte("stub"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	host := newFakeHost(nil)
+	p := NewPlugin(engine.New(nil), host)
+	defer p.Shutdown()
+
+	if _, err := p.Dispatch(pluginabi.MethodPluginRegister, mustJSON(t, map[string]any{
+		"config_yaml": []byte("model:\n  enabled: true\n  dir: " + modelDir + "\n"),
+	})); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// Portal HTML references model download endpoint without leaking modelDir.
+	portalRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/cpa-reductant/ui",
+	}))
+	if err != nil {
+		t.Fatalf("portal: %v", err)
+	}
+	portalBody := string(portalRaw.(pluginapi.ManagementResponse).Body)
+	if !strings.Contains(portalBody, "/v0/management/cpa-reductant/model/download") || strings.Contains(portalBody, modelDir) {
+		t.Fatalf("portal must reference model download endpoint and must not leak modelDir")
+	}
+
+	// Download route succeeds cleanly when weights are already present.
+	dlRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method: http.MethodPost,
+		Path:   "/v0/management/cpa-reductant/model/download",
+	}))
+	if err != nil {
+		t.Fatalf("post model download: %v", err)
+	}
+	dlResp := dlRaw.(pluginapi.ManagementResponse)
+	if dlResp.StatusCode != http.StatusOK || dlResp.Headers.Get("Cache-Control") != "no-store" {
+		t.Fatalf("expected 200 no-store on model download, got status=%d headers=%v", dlResp.StatusCode, dlResp.Headers)
+	}
+	var st engine.ModelStatus
+	if err := json.Unmarshal(dlResp.Body, &st); err != nil {
+		t.Fatalf("decode model status: %v", err)
+	}
+	if !st.Enabled || !st.AutoDownload || !st.Installed || st.Layout != "flat" {
+		t.Fatalf("unexpected model status: %+v", st)
 	}
 }

@@ -411,6 +411,16 @@ func (e *Engine) Update(cfg *config.Config) {
 	}
 }
 
+func (e *Engine) TriggerModelDownload(mirror string) (ModelStatus, error) {
+	if e == nil || e.model == nil {
+		return ModelStatus{}, errors.New("model runner not initialized")
+	}
+	if err := e.model.TriggerDownload(mirror); err != nil {
+		return e.ModelStatus(), err
+	}
+	return e.ModelStatus(), nil
+}
+
 func (e *Engine) Close() {
 	if e != nil && e.model != nil {
 		e.model.Close()

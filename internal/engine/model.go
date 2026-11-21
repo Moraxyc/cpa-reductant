@@ -44,6 +44,12 @@ type spanFinder interface {
 type ModelStatus struct {
 	Enabled         bool           `json:"enabled"`
 	Name            string         `json:"name"`
+	Revision        string         `json:"revision,omitempty"`
+	Strict          bool           `json:"strict"`
+	AutoDownload    bool           `json:"auto_download"`
+	MinScore        float64        `json:"min_score,omitempty"`
+	WaitMS          int64          `json:"wait_ms,omitempty"`
+	Mirror          string         `json:"mirror,omitempty"`
 	Dir             string         `json:"dir"`
 	ResolvedDir     string         `json:"resolved_dir,omitempty"`
 	Layout          string         `json:"layout,omitempty"`
@@ -91,14 +97,15 @@ func mapGuardLabel(label string) string {
 }
 
 type modelRunner struct {
-	mu        sync.Mutex
-	cfg       config.ModelConfig
-	loader    func(dir string) (spanFinder, error)
-	loaded    spanFinder
-	loadedDir string
-	lastErr   error
-	fails     int
-	retryAt   time.Time
+	mu            sync.Mutex
+	cfg           config.ModelConfig
+	loader        func(dir string) (spanFinder, error)
+	loaded        spanFinder
+	loadedDir     string
+	lastErr       error
+	fails         int
+	retryAt       time.Time
+	missingWarned bool
 
 	turn       chan struct{}
 	queue      turnQueue
@@ -140,7 +147,7 @@ func newModelRunner(cfg config.ModelConfig) *modelRunner {
 			"error":     err.Error(),
 		})
 	})
-	if cfg.Enabled && cfg.AutoDownload {
+	if cfg.Enabled && cfg.EffectiveAutoDownload() {
 		r.maybeDownload(cfg)
 	}
 	return r
@@ -180,6 +187,9 @@ func (r *modelRunner) Configure(cfg config.ModelConfig) {
 		r.retryAt = time.Time{}
 		r.behindAt.Store(0)
 	}
+	if !cfg.Enabled || dirChanged || cfg.EffectiveAutoDownload() != r.cfg.EffectiveAutoDownload() || cfg.Strict != r.cfg.Strict {
+		r.missingWarned = false
+	}
 	r.cfg = cfg
 	r.mu.Unlock()
 
@@ -193,8 +203,12 @@ func (r *modelRunner) Configure(cfg config.ModelConfig) {
 	} else if !cfg.Enabled && prevDir != "" {
 		r.disk.flush(prevDir, r.cache)
 	}
-	if cfg.Enabled && cfg.AutoDownload {
-		r.maybeDownload(cfg)
+	if cfg.Enabled {
+		if cfg.EffectiveAutoDownload() {
+			r.maybeDownload(cfg)
+		} else if !modelInstalled(nextDir) {
+			r.warnMissingWeights(cfg, nextDir)
+		}
 	}
 }
 
@@ -243,6 +257,12 @@ func (r *modelRunner) Status() ModelStatus {
 	return ModelStatus{
 		Enabled:         cfg.Enabled,
 		Name:            cfg.EffectiveName(),
+		Revision:        guard.Rev[:12],
+		Strict:          cfg.Strict,
+		AutoDownload:    cfg.EffectiveAutoDownload(),
+		MinScore:        cfg.EffectiveMinScore(),
+		WaitMS:          cfg.EffectiveWait().Milliseconds(),
+		Mirror:          strings.TrimSpace(cfg.Mirror),
 		Dir:             dir,
 		ResolvedDir:     resolvedDir,
 		Layout:          layout,
@@ -267,8 +287,58 @@ func (r *modelRunner) Status() ModelStatus {
 	}
 }
 
+func (r *modelRunner) warnMissingWeights(cfg config.ModelConfig, dir string) {
+	r.mu.Lock()
+	if r.missingWarned || r.logFn == nil {
+		r.mu.Unlock()
+		return
+	}
+	r.missingWarned = true
+	r.mu.Unlock()
+
+	r.logf("warn", fmt.Sprintf("astrlink-guard enabled but weights not found in %q and auto_download is false; place weights manually or remove auto_download: false", dir), map[string]any{
+		"component":     "local_model",
+		"dir":           dir,
+		"auto_download": cfg.EffectiveAutoDownload(),
+		"strict":        cfg.Strict,
+	})
+}
+
+func (r *modelRunner) TriggerDownload(mirrorOverride string) error {
+	r.mu.Lock()
+	cfg := r.cfg
+	r.mu.Unlock()
+	dir := cfg.EffectiveDir()
+	if dir == "" {
+		return errors.New("model directory could not be resolved; set model.dir or CPA_REDUCTANT_MODEL_DIR")
+	}
+	if modelInstalled(dir) {
+		r.mu.Lock()
+		r.lastErr = nil
+		r.fails = 0
+		r.retryAt = time.Time{}
+		r.mu.Unlock()
+		return nil
+	}
+	mirror := strings.TrimSpace(mirrorOverride)
+	if mirror == "" {
+		mirror = cfg.Mirror
+	}
+	r.downloader.ForceAsync(dir, mirror, func() {
+		r.mu.Lock()
+		if r.cfg.EffectiveDir() == dir {
+			r.lastErr = nil
+			r.fails = 0
+			r.retryAt = time.Time{}
+			r.missingWarned = false
+		}
+		r.mu.Unlock()
+	})
+	return nil
+}
+
 func (r *modelRunner) maybeDownload(cfg config.ModelConfig) {
-	if !cfg.Enabled || !cfg.AutoDownload || r.downloader == nil {
+	if !cfg.Enabled || !cfg.EffectiveAutoDownload() || r.downloader == nil {
 		return
 	}
 	dir := cfg.EffectiveDir()
@@ -373,8 +443,10 @@ func (r *modelRunner) ensureModel(cfg config.ModelConfig) (spanFinder, error) {
 
 	loadDir, ok := resolveModelDir(dir)
 	if !ok {
-		if cfg.AutoDownload {
+		if cfg.EffectiveAutoDownload() {
 			r.maybeDownload(cfg)
+		} else {
+			r.warnMissingWeights(cfg, dir)
 		}
 		return nil, fmt.Errorf("%w: model files not found in %q", ErrModelUnavailable, dir)
 	}

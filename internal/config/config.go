@@ -62,8 +62,15 @@ type ModelConfig struct {
 	MinScore     float64 `yaml:"min_score"`
 	Strict       bool    `yaml:"strict"`
 	WaitMS       int     `yaml:"wait_ms"`
-	AutoDownload bool    `yaml:"auto_download"`
+	AutoDownload *bool   `yaml:"auto_download"`
 	Mirror       string  `yaml:"mirror"`
+}
+
+func (m ModelConfig) EffectiveAutoDownload() bool {
+	if m.AutoDownload == nil {
+		return true
+	}
+	return *m.AutoDownload
 }
 
 func (m ModelConfig) EffectiveName() string {
@@ -360,7 +367,7 @@ func Metadata() pluginapi.Metadata {
 		Author:           "moraxyc",
 		GitHubRepository: "https://github.com/moraxyc/cpa-reductant",
 		ConfigFields: []pluginapi.ConfigField{
-			{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Exact model IDs (empty: all models)"},
+			{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Target LLM model IDs to redact (empty: all models; unrelated to local PII model)"},
 			{Name: "protocols", Type: pluginapi.ConfigFieldTypeArray, Description: "Exact protocol formats (empty: all supported CPA formats)"},
 			{Name: "secrets", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Mask secrets such as API keys, private keys, tokens, and passwords (default: true)"},
 			{Name: "personal", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Mask built-in personal data categories (default: true)"},
@@ -374,7 +381,7 @@ func Metadata() pluginapi.Metadata {
 			{Name: "shape", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Use format-preserving synthetic stand-ins instead of {{...}} placeholders"},
 			{Name: "block_terms", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Reject instead of masking configured terms"},
 			{Name: "key_path", Type: pluginapi.ConfigFieldTypeString, Description: "Path to persist the 32-byte placeholder HMAC key across restarts"},
-			{Name: "model", Type: pluginapi.ConfigFieldTypeObject, Description: "Local PII detection model configuration (enabled, name, dir, min_score, strict, wait_ms, auto_download, mirror)"},
+			{Name: "model", Type: pluginapi.ConfigFieldTypeObject, Description: "Local PII NER model (astrlink-guard): set enabled=true (auto-downloads by default unless auto_download=false); fields: enabled, auto_download, name, dir, min_score, strict, wait_ms, mirror"},
 		},
 	}
 }
