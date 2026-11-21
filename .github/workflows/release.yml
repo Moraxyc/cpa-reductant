@@ -66,7 +66,7 @@ jobs:
             nix build ".#portable-$target" -o "result-$target" --print-build-logs
             platform="${target//-/_}"
             mkdir -p "dist/$platform"
-            cp -L "result-$target/lib/${PLUGIN_ID}."* "dist/$platform/"
+            cp -L "result-$target/lib/cliproxyapi/plugins/${target%-*}/${target#*-}/${PLUGIN_ID}."* "dist/$platform/"
             chmod 0755 "dist/$platform/${PLUGIN_ID}."*
           done
 

@@ -36,7 +36,7 @@ stdenv.mkDerivation {
   checkPhase = ''
     runHook preCheck
     CPA_BIN=${lib.getExe cliproxyapi} \
-    CPA_PLUGIN_PATH=${pluginPkg}/lib/cpa-reductant${stdenv.hostPlatform.extensions.sharedLibrary} \
+    CPA_PLUGIN_PATH=${pluginPkg}/lib/cliproxyapi/plugins/${stdenv.hostPlatform.go.GOOS}/${stdenv.hostPlatform.go.GOARCH}/cpa-reductant${stdenv.hostPlatform.extensions.sharedLibrary} \
     go test -v ./test/...
     runHook postCheck
   '';

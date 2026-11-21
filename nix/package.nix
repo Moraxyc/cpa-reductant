@@ -47,7 +47,8 @@ buildGoModule (finalAttrs: {
 
   installPhase = ''
     runHook preInstall
-    install -Dm755 cpa-reductant${stdenv.hostPlatform.extensions.sharedLibrary} "$out/lib/cpa-reductant${stdenv.hostPlatform.extensions.sharedLibrary}"
+    target="$out/lib/cliproxyapi/plugins/${stdenv.hostPlatform.go.GOOS}/${stdenv.hostPlatform.go.GOARCH}"
+    install -Dm755 cpa-reductant${stdenv.hostPlatform.extensions.sharedLibrary} "$target/cpa-reductant${stdenv.hostPlatform.extensions.sharedLibrary}"
     install -Dm644 cpa-reductant.h "$out/include/cpa-reductant.h"
     runHook postInstall
   '';

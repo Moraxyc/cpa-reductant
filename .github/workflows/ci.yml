@@ -54,7 +54,7 @@ jobs:
           for target in linux-amd64 linux-arm64 windows-amd64 windows-arm64; do
             nix build ".#portable-$target" -o "result-$target" --print-build-logs
             mkdir -p "dist/$target"
-            cp -L "result-$target/lib/"* "result-$target/include/"* "dist/$target/"
+            cp -L "result-$target/lib/cliproxyapi/plugins/${target%-*}/${target#*-}/"* "result-$target/include/"* "dist/$target/"
           done
 
       - name: Upload portable artifacts

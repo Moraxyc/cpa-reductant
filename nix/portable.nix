@@ -53,7 +53,8 @@ stdenv.mkDerivation {
 
   installPhase = ''
     runHook preInstall
-    install -Dm755 cpa-reductant${ext} "$out/lib/cpa-reductant${ext}"
+    target="$out/lib/cliproxyapi/plugins/${goos}/${goarch}"
+    install -Dm755 cpa-reductant${ext} "$target/cpa-reductant${ext}"
     install -Dm644 cpa-reductant.h "$out/include/cpa-reductant.h"
     runHook postInstall
   '';
