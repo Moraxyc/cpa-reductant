@@ -20,7 +20,7 @@ CLIProxyAPI 的原生 `.so` 插件，直接挂载于原版 CPA 进程内，无�
 推荐使用 Nix Flake 进入开发环境（会自动挂载打过补丁的 Magpie 到 `.cache/magpie`）：
 
 ```sh
-nix develop
+nix develop --accept-flake-config
 go test ./...
 bash scripts/build.sh
 CPA_BIN=cliproxyapi go test -v ./test/...
@@ -29,8 +29,13 @@ CPA_BIN=cliproxyapi go test -v ./test/...
 也可直接通过 Nix 构建插件包：
 
 ```sh
-nix build
+nix build --accept-flake-config
 ```
+
+如需手动配置 Nix 二进制缓存：
+
+- Substituter: `https://nix-cache.qaq.li/cpa-reductant`
+- Trusted Public Key: `cpa-reductant:MMH53Hi2EWPzqIR73luxnwvuK/+Mixft1TToFSSILZo=`
 
 脱离 Nix 环境时，需自行准备 Go 1.26.10+、C 编译器、curl、tar 和 git，`scripts/build.sh` 会依据 `flake.lock` 拉取并打补丁到 `.cache/magpie`，并从 `VERSION` 读取版本号通过 `-ldflags` 注入 `github.com/moraxyc/cpa-reductant/internal/config.Version`，产出 `dist/cpa-reductant.so`。手动调用 `go build` 时也可同样传入 `-ldflags "-X github.com/moraxyc/cpa-reductant/internal/config.Version=$(tr -d '[:space:]' < VERSION)"`。
 

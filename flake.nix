@@ -1,6 +1,13 @@
 {
   description = "CLIProxyAPI reversible redaction plugin powered by Magpie";
 
+  nixConfig = {
+    extra-substituters = [ "https://nix-cache.qaq.li/cpa-reductant" ];
+    extra-trusted-public-keys = [
+      "cpa-reductant:MMH53Hi2EWPzqIR73luxnwvuK/+Mixft1TToFSSILZo="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     systems.url = "github:nix-systems/default";
