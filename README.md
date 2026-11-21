@@ -99,8 +99,9 @@ plugins:
 
 ### 管理接口与可观测性
 
-插件向 CPA 注册了认证保护的 Management API 路由（全部受 CPA `management.secret-key` 保护，不暴露免鉴权界面），同时将关键拦截、降级与模型事件通过 CPA `host.log` 写入宿主结构化日志（自动关联 `request_id`）：
+插件在 `management.html` 左侧菜单提供了前端入口，并在 `management.secret-key` 保护下提供状态与预览接口。拦截、降级与模型事件也会通过 `host.log` 写入宿主日志。
 
+- **控制面板入口**：`GET /v0/resource/plugins/cpa-reductant/ui` 会显示在 `management.html` 左侧「插件」菜单中。该页面不含任何运行状态或隐私数据；打开后输入 `management.secret-key` 登录，即可加载完整看板。
 - **机器可分析视图**：`GET /v0/management/cpa-reductant/status` 返回全量 JSON 快照，包含插件运行时间、策略与 `key_path` 持久化状态、脱敏与响应/流式还原统计、平均/P95/最大耗时、分协议/模型流量分布、本地 PII 模型状态及近期非明文审计事件环（支持 `?events=N` 调节条数、`?action=mask|warn|block|restore|passthrough|error` 过滤）。
 - **人类可读视觉看板**：`GET /v0/management/cpa-reductant/ui`（或 `GET /v0/management/cpa-reductant/status?format=html` / `Accept: text/html`）使用服务端渲染单页 HTML 展示过滤器运行状态、敏感类别与检出引擎分布条、协议/模型处理量、分色过滤流水线（仅展示前缀 Hint 与占位符 ID）与在线只读预览区（支持 `?refresh=5` 开启自动刷新）。
 - **只读策略预览**：`POST /v0/management/cpa-reductant/preview` 接收 `{"text": "..."}`，以当前策略执行只读脱敏预览（不写入占位符记忆与统计），返回预览文本、命中元数据与耗时。

@@ -954,6 +954,33 @@ func TestSmokeCPA(t *testing.T) {
 		stop()
 		t.Fatalf("expected 401 for unauthenticated ui access, got %d", unauthResp.StatusCode)
 	}
+	// Management plugins list exposes menu entry under /v0/resource/plugins/cpa-reductant/ui
+	pluginsReq, _ := http.NewRequest(http.MethodGet, baseURL+"/v0/management/plugins", nil)
+	pluginsReq.Header.Set("Authorization", "Bearer test-management-key")
+	pluginsResp, err := (&http.Client{Timeout: 5 * time.Second}).Do(pluginsReq)
+	if err != nil {
+		stop()
+		t.Fatalf("management plugins GET: %v", err)
+	}
+	pluginsBody, _ := io.ReadAll(pluginsResp.Body)
+	_ = pluginsResp.Body.Close()
+	if pluginsResp.StatusCode != http.StatusOK || !strings.Contains(string(pluginsBody), "/v0/resource/plugins/cpa-reductant/ui") {
+		stop()
+		t.Fatalf("expected resource ui menu in /v0/management/plugins, status=%d body=%s", pluginsResp.StatusCode, pluginsBody)
+	}
+	// Unauthenticated resource portal loads without exposing any runtime model names or secrets.
+	portalReq, _ := http.NewRequest(http.MethodGet, baseURL+"/v0/resource/plugins/cpa-reductant/ui", nil)
+	portalResp, err := (&http.Client{Timeout: 5 * time.Second}).Do(portalReq)
+	if err != nil {
+		stop()
+		t.Fatalf("resource ui GET: %v", err)
+	}
+	portalBody, _ := io.ReadAll(portalResp.Body)
+	_ = portalResp.Body.Close()
+	if portalResp.StatusCode != http.StatusOK || !strings.Contains(portalResp.Header.Get("Content-Type"), "text/html") || !strings.Contains(string(portalBody), "auth-form") || strings.Contains(string(portalBody), smokeTerm) || strings.Contains(string(portalBody), smokeClaudeModel) {
+		stop()
+		t.Fatalf("unexpected resource ui portal response: status=%d ct=%s", portalResp.StatusCode, portalResp.Header.Get("Content-Type"))
+	}
 	previewReq, _ := http.NewRequest(http.MethodPost, baseURL+"/v0/management/cpa-reductant/preview", strings.NewReader(`{"text":"`+smokeTerm+`"}`))
 	previewReq.Header.Set("Authorization", "Bearer test-management-key")
 	previewReq.Header.Set("Content-Type", "application/json")

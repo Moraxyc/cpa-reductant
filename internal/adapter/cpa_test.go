@@ -859,13 +859,16 @@ func TestManagementStatusAndPreview(t *testing.T) {
 		t.Fatalf("management.register: %v", err)
 	}
 	mgmtReg := routesResp.(pluginapi.ManagementRegistrationResponse)
-	if len(mgmtReg.Routes) != 3 || len(mgmtReg.Resources) != 0 {
-		t.Fatalf("expected 3 authenticated management routes and 0 unauthenticated resources, got routes=%#v resources=%#v", mgmtReg.Routes, mgmtReg.Resources)
+	if len(mgmtReg.Routes) != 3 || len(mgmtReg.Resources) != 1 {
+		t.Fatalf("expected 3 authenticated management routes and 1 resource portal route, got routes=%#v resources=%#v", mgmtReg.Routes, mgmtReg.Resources)
 	}
 	for _, r := range mgmtReg.Routes {
 		if r.Menu != "" {
-			t.Fatalf("expected no unauthenticated Menu resource routes, got %#v", r)
+			t.Fatalf("expected no unauthenticated Menu on management routes, got %#v", r)
 		}
+	}
+	if mgmtReg.Resources[0].Path != "/ui" || mgmtReg.Resources[0].Menu != config.PluginID {
+		t.Fatalf("unexpected resource menu entry: %#v", mgmtReg.Resources[0])
 	}
 
 	// Trigger one mask + restore so stats, dimensions, and recent events are populated.
@@ -938,6 +941,28 @@ func TestManagementStatusAndPreview(t *testing.T) {
 	}
 	if len(compactSt.RecentEvents) != 0 {
 		t.Fatalf("expected 0 events with ?events=0, got %d", len(compactSt.RecentEvents))
+	}
+
+	// Resource UI portal loads without leaking any runtime status, model names, or secrets.
+	portalRespRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/cpa-reductant/ui",
+	}))
+	if err != nil {
+		t.Fatalf("resource ui portal: %v", err)
+	}
+	portalResp := portalRespRaw.(pluginapi.ManagementResponse)
+	if portalResp.StatusCode != http.StatusOK || !strings.Contains(portalResp.Headers.Get("Content-Type"), "text/html") {
+		t.Fatalf("expected 200 text/html for resource portal, got status=%d headers=%v", portalResp.StatusCode, portalResp.Headers)
+	}
+	portalBody := string(portalResp.Body)
+	if !strings.Contains(portalBody, "auth-form") || !strings.Contains(portalBody, "/v0/management/cpa-reductant/status") {
+		t.Fatalf("expected login form and status API endpoint in:\n%s", portalBody)
+	}
+	for _, forbidden := range []string{"claude-sonnet-test", "SYNTHETIC-MGMT-SECRET", "bob@acme.io", "TERM_"} {
+		if strings.Contains(portalBody, forbidden) {
+			t.Fatalf("resource portal must not leak runtime/config data %q", forbidden)
+		}
 	}
 
 	// Visual HTML dashboard works via ?format=html, Accept: text/html, and /ui without leaking plaintext.

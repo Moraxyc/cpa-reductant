@@ -127,17 +127,9 @@ var dashboardTmpl = template.Must(template.New("dashboard").Funcs(template.FuncM
 			return "badge-muted"
 		}
 	},
-}).Parse(dashboardHTML))
+}).Parse(strings.Replace(dashboardHTML, "/*__DASHBOARD_CSS__*/", dashboardCSS, 1)))
 
-const dashboardHTML = `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-{{if gt .RefreshSeconds 0}}<meta http-equiv="refresh" content="{{.RefreshSeconds}}">{{end}}
-<title>cpa-reductant 状态监控</title>
-<style>
-:root{
+const dashboardCSS = `:root{
   --bg:#f6f8fa;--surface:#ffffff;--surface-2:#f0f3f6;--border:#d8dee4;
   --text:#1f2328;--muted:#636c76;
   --blue:#0969da;--blue-bg:#ddf4ff;
@@ -203,7 +195,17 @@ tr:last-child td{border-bottom:none}
 .empty{padding:20px;text-align:center;color:var(--muted);font-size:13px}
 textarea{width:100%;min-height:76px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font:12px/1.5 var(--mono);resize:vertical}
 .preview-out{margin-top:10px;padding:10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-word;display:none}
-.err-box{margin-top:8px;padding:8px 10px;border-radius:6px;background:var(--red-bg);color:var(--red);font-size:12px}
+.err-box{margin-top:8px;padding:8px 10px;border-radius:6px;background:var(--red-bg);color:var(--red);font-size:12px}`
+
+const dashboardHTML = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+{{if gt .RefreshSeconds 0}}<meta http-equiv="refresh" content="{{.RefreshSeconds}}">{{end}}
+<title>cpa-reductant 状态监控</title>
+<style>
+/*__DASHBOARD_CSS__*/
 </style>
 </head>
 <body>
@@ -511,6 +513,535 @@ async function runPreview(){
     meta.textContent='';
   }
 }
+</script>
+</body>
+</html>
+`
+
+func renderPortalHTML() pluginapi.ManagementResponse {
+	html := strings.Replace(portalHTML, "/*__DASHBOARD_CSS__*/", dashboardCSS, 1)
+	return pluginapi.ManagementResponse{
+		StatusCode: http.StatusOK,
+		Headers: http.Header{
+			"Content-Type":  {"text/html; charset=utf-8"},
+			"Cache-Control": {"no-store"},
+		},
+		Body: []byte(html),
+	}
+}
+
+var portalHTML = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cpa-reductant 状态监控</title>
+<style>
+/*__DASHBOARD_CSS__*/
+.auth-wrap{max-width:460px;margin:48px auto}
+.auth-form{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.input{flex:1;min-width:200px;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font:13px/1.4 var(--mono)}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<div id="auth-card" class="card auth-wrap">
+  <div class="title-row">
+    <h1>cpa-reductant</h1>
+    <span class="badge badge-amber"><span class="dot"></span>需要登录</span>
+  </div>
+  <div class="sub" style="margin-top:8px">
+    请输入 CPA 管理密钥（<span class="mono">management.secret-key</span>）查看监控看板。密钥仅保存在当前标签页。
+  </div>
+  <form id="auth-form" class="auth-form">
+    <input id="secret-input" class="input" type="password" autocomplete="current-password" placeholder="输入 management.secret-key" required>
+    <button id="auth-submit" class="btn active" type="submit">进入看板</button>
+  </form>
+  <div id="auth-err" class="err-box hidden"></div>
+</div>
+
+<div id="app" class="wrap hidden">
+  <div class="card">
+    <div class="header">
+      <div>
+        <div class="title-row">
+          <h1>cpa-reductant</h1>
+          <span id="health-badge" class="badge badge-blue"></span>
+          <span id="version-badge" class="badge badge-muted mono"></span>
+        </div>
+        <div id="time-sub" class="sub" style="margin-top:4px"></div>
+      </div>
+      <div class="actions">
+        <button id="auto-refresh-btn" class="btn" type="button" onclick="toggleAutoRefresh()">5s 自动刷新</button>
+        <button class="btn" type="button" onclick="loadStatus()">刷新</button>
+        <button class="btn" type="button" onclick="openJSON()">JSON</button>
+        <button class="btn" type="button" onclick="disconnectKey()">退出登录</button>
+      </div>
+    </div>
+    <div id="policy-chips" class="chips"></div>
+    <div id="runtime-errors"></div>
+  </div>
+
+  <div id="kpi-grid" class="grid-4"></div>
+
+  <div class="grid-2">
+    <div class="card">
+      <h2>命中类别<span class="sub">按脱敏类型</span></h2>
+      <div id="kind-bars"></div>
+    </div>
+    <div class="card">
+      <h2>检出方式<span class="sub">按识别来源</span></h2>
+      <div id="finder-bars"></div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <h2>协议统计</h2>
+      <div id="protocol-table"></div>
+    </div>
+    <div class="card">
+      <h2>模型统计</h2>
+      <div id="model-table"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>
+      <span>最近过滤记录 <span class="sub">仅保留前缀提示与占位符，不保存明文</span></span>
+      <span id="event-filters" class="actions"></span>
+    </h2>
+    <div id="events-table"></div>
+  </div>
+
+  <div class="card">
+    <h2>脱敏预览 <span class="sub">只读测试，不计入统计或还原映射</span></h2>
+    <textarea id="preview-input" placeholder="输入测试文本（例如：Authorization: Bearer sk-ant-api03-example1234567890, contact alice@example.com）"></textarea>
+    <div class="actions" style="margin-top:8px">
+      <button class="btn" type="button" onclick="runPreview()">测试</button>
+      <span id="preview-meta" class="sub"></span>
+    </div>
+    <div id="preview-out" class="preview-out"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var KEY_STORAGE = 'cpa_reductant_mgmt_key';
+  var STATUS_URL = '/v0/management/cpa-reductant/status';
+  var PREVIEW_URL = '/v0/management/cpa-reductant/preview';
+  var FINDER_META = {rule:'内置规则',yours:'自定义规则',word:'词表',model:'本地模型',known:'关联匹配'};
+  var ACTION_FILTERS = [['','全部'],['mask','脱敏'],['warn','告警'],['block','拦截'],['restore','还原'],['passthrough','放行'],['error','错误']];
+
+  var state = {
+    key: '',
+    actionFilter: '',
+    autoTimer: null,
+    lastStatus: null
+  };
+
+  function esc(v){
+    return String(v == null ? '' : v)
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;')
+      .replace(/'/g,'&#39;');
+  }
+
+  function fmtMS(v){
+    var n = Number(v || 0);
+    if(!n) return '0 ms';
+    return n < 1 ? n.toFixed(2)+' ms' : n.toFixed(1)+' ms';
+  }
+
+  function fmtBytes(b){
+    var n = Number(b || 0);
+    if(n < 1024) return n + ' B';
+    var units = ['KiB','MiB','GiB','TiB'];
+    var exp = 0;
+    var div = 1024;
+    while(n / div >= 1024 && exp < units.length - 1){
+      div *= 1024;
+      exp++;
+    }
+    return (n / div).toFixed(1) + ' ' + units[exp];
+  }
+
+  function fmtDuration(sec){
+    var s = Number(sec || 0);
+    if(s < 60) return s + 's';
+    if(s < 3600) return Math.floor(s / 60) + 'm' + (s % 60) + 's';
+    return Math.floor(s / 3600) + 'h' + Math.floor((s % 3600) / 60) + 'm';
+  }
+
+  function shortTime(ts){
+    if(!ts) return '';
+    var d = new Date(ts);
+    if(isNaN(d.getTime())) return ts;
+    var pad = function(n){ return n < 10 ? '0' + n : '' + n; };
+    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+
+  function pctString(num, den){
+    if(!den || den <= 0) return '0%';
+    return ((num * 100) / den).toFixed(1) + '%';
+  }
+
+  function phaseLabel(p){
+    switch(String(p || '').toLowerCase()){
+      case 'request': return '请求';
+      case 'response': return '响应';
+      case 'stream': return '流式';
+      case 'model': return '模型';
+      default: return p || '';
+    }
+  }
+
+  function actionLabel(a){
+    switch(String(a || '').toLowerCase()){
+      case 'block': return '拦截';
+      case 'warn': return '告警';
+      case 'mask': return '脱敏';
+      case 'restore': return '还原';
+      case 'passthrough': return '放行';
+      case 'error': return '错误';
+      case 'degraded': return '降级';
+      default: return a || '';
+    }
+  }
+
+  function actionClass(a){
+    switch(String(a || '').toLowerCase()){
+      case 'block': case 'error': case 'degraded': return 'badge-red';
+      case 'warn': return 'badge-amber';
+      case 'mask': return 'badge-blue';
+      case 'restore': return 'badge-green';
+      default: return 'badge-muted';
+    }
+  }
+
+  function deriveHealth(st){
+    var m = st.model || {};
+    var s = st.stats || {};
+    if(m.enabled){
+      if(m.last_error || m.download_error) return ['模型异常（规则兜底）','badge-red'];
+      if(m.downloading) return ['模型下载中','badge-amber'];
+      if(m.behind) return ['模型繁忙（超时降级）','badge-amber'];
+      if(!m.installed) return ['等待模型文件','badge-amber'];
+    }
+    if((s.requests_total || 0) > 0) return ['运行中','badge-green'];
+    return ['空闲','badge-blue'];
+  }
+
+  function showAuth(msg){
+    stopAutoRefresh();
+    state.key = '';
+    try{ sessionStorage.removeItem(KEY_STORAGE); }catch(_){}
+    document.getElementById('app').classList.add('hidden');
+    document.getElementById('auth-card').classList.remove('hidden');
+    var errEl = document.getElementById('auth-err');
+    if(msg){
+      errEl.textContent = msg;
+      errEl.classList.remove('hidden');
+    } else {
+      errEl.textContent = '';
+      errEl.classList.add('hidden');
+    }
+  }
+
+  function showApp(){
+    document.getElementById('auth-card').classList.add('hidden');
+    document.getElementById('app').classList.remove('hidden');
+  }
+
+  function renderBars(elId, counts, metaMap, green){
+    var el = document.getElementById(elId);
+    var entries = Object.entries(counts || {}).filter(function(kv){ return kv[1] > 0; });
+    if(!entries.length){
+      el.innerHTML = '<div class="empty">暂无记录</div>';
+      return;
+    }
+    var total = entries.reduce(function(acc, kv){ return acc + kv[1]; }, 0);
+    entries.sort(function(a, b){ return b[1] === a[1] ? (a[0] < b[0] ? -1 : 1) : b[1] - a[1]; });
+    el.innerHTML = '<div class="bar-list">' + entries.map(function(kv){
+      var pct = ((kv[1] * 100) / total).toFixed(1);
+      var meta = metaMap && metaMap[kv[0]] ? ' <span class="sub">' + esc(metaMap[kv[0]]) + '</span>' : '';
+      return '<div class="bar-row">' +
+        '<div class="bar-head"><span class="mono"><strong>' + esc(kv[0]) + '</strong>' + meta + '</span>' +
+        '<span class="mono">' + kv[1] + ' (' + pct + '%)</span></div>' +
+        '<div class="bar-track"><div class="bar-fill' + (green ? ' green' : '') + '" style="width:' + pct + '%"></div></div>' +
+      '</div>';
+    }).join('') + '</div>';
+  }
+
+  function renderDimTable(elId, dims, label, emptyMsg){
+    var el = document.getElementById(elId);
+    var entries = Object.entries(dims || {});
+    if(!entries.length){
+      el.innerHTML = '<div class="empty">' + esc(emptyMsg) + '</div>';
+      return;
+    }
+    entries.sort(function(a, b){
+      var ra = a[1].requests || 0, rb = b[1].requests || 0;
+      return rb === ra ? (a[0] < b[0] ? -1 : 1) : rb - ra;
+    });
+    el.innerHTML = '<table><thead><tr><th>' + esc(label) + '</th><th>请求</th><th>脱敏 / 拦截</th><th>命中</th><th>还原</th><th>入站</th></tr></thead><tbody>' +
+      entries.map(function(kv){
+        var d = kv[1] || {};
+        return '<tr>' +
+          '<td class="mono"><strong>' + esc(kv[0]) + '</strong></td>' +
+          '<td class="mono">' + (d.requests || 0) + '</td>' +
+          '<td class="mono">' + (d.masked || 0) + ' / ' + (d.blocked || 0) + '</td>' +
+          '<td class="mono">' + (d.hits || 0) + '</td>' +
+          '<td class="mono">' + (d.placeholders_restored || 0) + '</td>' +
+          '<td class="mono">' + fmtBytes(d.bytes_in || 0) + '</td>' +
+        '</tr>';
+      }).join('') + '</tbody></table>';
+  }
+
+  function renderStatus(st){
+    state.lastStatus = st;
+    var health = deriveHealth(st);
+    var hb = document.getElementById('health-badge');
+    hb.className = 'badge ' + health[1];
+    hb.innerHTML = '<span class="dot"></span>' + esc(health[0]);
+    document.getElementById('version-badge').textContent = 'v' + (st.version || '');
+
+    var tsHtml = '启动 <span class="mono">' + esc(st.started_at) + '</span> · 已运行 <span class="mono">' + esc(fmtDuration(st.uptime_seconds)) + '</span>';
+    tsHtml += st.last_activity_at ? ' · 最近请求 <span class="mono">' + esc(st.last_activity_at) + '</span>' : ' · 暂无请求';
+    if(st.last_reconfigured_at) tsHtml += ' · 最近重载 <span class="mono">' + esc(st.last_reconfigured_at) + '</span>';
+    document.getElementById('time-sub').innerHTML = tsHtml;
+
+    var p = st.policy || {};
+    var m = st.model || {};
+    var dlPct = m.download_total > 0 ? Math.round((m.download_done || 0) * 100 / m.download_total) : 0;
+    var keyStatus = !p.key_path_configured ? '临时（仅内存）' : (p.key_path_active ? '已持久化' : '异常');
+    var modelStatus = !m.enabled ? '未启用' :
+      m.loaded ? (esc(m.name) + ' · 已加载 (' + (m.cores || 0) + ' 核)') :
+      m.downloading ? (esc(m.name) + ' · 下载中 (' + dlPct + '%)') :
+      m.installed ? (esc(m.name) + ' · 就绪') : (esc(m.name) + ' · 缺失');
+    document.getElementById('policy-chips').innerHTML = [
+      '<strong>密钥脱敏:</strong> ' + (p.secrets ? '开' : '关'),
+      '<strong>个人隐私:</strong> ' + (p.personal ? '开' : '关'),
+      '<strong>词表:</strong> ' + (p.words_count || 0),
+      '<strong>规则:</strong> ' + (p.rules_count || 0),
+      '<strong>白名单:</strong> ' + (p.allow_count || 0),
+      '<strong>替换形式:</strong> ' + (p.shape ? '保形替换' : '占位符'),
+      '<strong>HMAC 密钥:</strong> ' + keyStatus,
+      '<strong>PII 模型:</strong> ' + modelStatus
+    ].map(function(c){ return '<span class="chip">' + c + '</span>'; }).join('');
+
+    var errs = [];
+    if(p.key_path_error) errs.push('HMAC 密钥异常: ' + p.key_path_error);
+    if(m.last_error) errs.push('模型错误: ' + m.last_error + (m.retry_at ? '（退避至 ' + m.retry_at + '）' : ''));
+    if(m.download_error) errs.push('模型下载失败: ' + m.download_error);
+    if(m.disk_cache_error) errs.push('磁盘缓存写入失败: ' + m.disk_cache_error);
+    document.getElementById('runtime-errors').innerHTML = errs.map(function(e){
+      return '<div class="err-box">' + esc(e) + '</div>';
+    }).join('');
+
+    var s = st.stats || {};
+    var ml = s.mask_latency_ms || {};
+    var rl = s.restore_latency_ms || {};
+    var il = m.infer_latency_ms || {};
+    document.getElementById('kpi-grid').innerHTML =
+      '<div class="card"><div class="kpi-label">请求处理</div><div class="kpi-val">' + (s.requests_total || 0) + '</div>' +
+      '<div class="kpi-meta"><span>脱敏 <strong>' + (s.requests_masked || 0) + '</strong> (' + pctString(s.requests_masked || 0, s.requests_total || 0) + ')</span>' +
+      '<span>拦截 <strong>' + (s.requests_blocked || 0) + '</strong> (' + pctString(s.requests_blocked || 0, s.requests_total || 0) + ')</span>' +
+      '<span>告警 <strong>' + (s.requests_warned || 0) + '</strong></span></div>' +
+      '<div class="kpi-meta"><span>平均 <strong>' + fmtMS(ml.avg_ms) + '</strong></span><span>P95 <strong>' + fmtMS(ml.p95_ms) + '</strong></span></div></div>' +
+
+      '<div class="card"><div class="kpi-label">敏感命中</div><div class="kpi-val">' + (s.hits_total || 0) + '</div>' +
+      '<div class="kpi-meta"><span>脱敏替换 <strong>' + (s.hits_masked || 0) + '</strong></span>' +
+      '<span>告警放行 <strong>' + (s.hits_warned || 0) + '</strong></span>' +
+      '<span>拒绝拦截 <strong>' + (s.hits_blocked || 0) + '</strong></span></div></div>' +
+
+      '<div class="card"><div class="kpi-label">响应还原</div><div class="kpi-val">' + (s.placeholders_restored || 0) + ' <span class="sub">次</span></div>' +
+      '<div class="kpi-meta"><span>JSON <strong>' + (s.responses_restored || 0) + '/' + (s.responses_total || 0) + '</strong></span>' +
+      '<span>SSE 流 <strong>' + (s.streams_restored || 0) + '/' + (s.streams_total || 0) + '</strong></span>' +
+      ((s.streams_failed || 0) > 0 ? '<span style="color:var(--red)">流失败 <strong>' + s.streams_failed + '</strong></span>' : '') + '</div>' +
+      '<div class="kpi-meta"><span>平均 <strong>' + fmtMS(rl.avg_ms) + '</strong></span><span>P95 <strong>' + fmtMS(rl.p95_ms) + '</strong></span></div></div>' +
+
+      '<div class="card"><div class="kpi-label">流量与缓存</div><div class="kpi-val">' + fmtBytes(s.bytes_masked_in || 0) + ' <span class="sub">入站</span></div>' +
+      '<div class="kpi-meta"><span>出站 <strong>' + fmtBytes(s.bytes_restored_out || 0) + '</strong></span>' +
+      '<span>缓存 <strong>' + (m.cache_entries || 0) + '</strong> 条</span>' +
+      '<span>命中率 <strong>' + pctString(m.cache_hits || 0, (m.cache_hits || 0) + (m.cache_misses || 0)) + '</strong></span></div>' +
+      (m.enabled ? '<div class="kpi-meta"><span>推理平均 <strong>' + fmtMS(il.avg_ms) + '</strong></span><span>降级 <strong>' + (m.partial_timeouts || 0) + '</strong></span><span>排队 <strong>' + (m.waiting || 0) + '</strong></span></div>' : '') +
+      '</div>';
+
+    renderBars('kind-bars', s.hits_by_kind, null, false);
+    renderBars('finder-bars', s.hits_by_finder, FINDER_META, true);
+    renderDimTable('protocol-table', s.by_protocol, '协议', '暂无请求数据');
+    renderDimTable('model-table', s.by_model, '模型', '暂无模型数据');
+
+    document.getElementById('event-filters').innerHTML = ACTION_FILTERS.map(function(item){
+      var active = state.actionFilter === item[0] ? ' active' : '';
+      return '<button class="btn' + active + '" type="button" data-action="' + esc(item[0]) + '">' + esc(item[1]) + '</button>';
+    }).join('');
+    Array.prototype.forEach.call(document.querySelectorAll('#event-filters button'), function(btn){
+      btn.onclick = function(){
+        state.actionFilter = btn.getAttribute('data-action') || '';
+        loadStatus();
+      };
+    });
+
+    var events = st.recent_events || [];
+    var evEl = document.getElementById('events-table');
+    if(!events.length){
+      evEl.innerHTML = '<div class="empty">暂无记录</div>';
+      return;
+    }
+    evEl.innerHTML = '<div style="overflow-x:auto"><table><thead><tr><th>时间</th><th>阶段</th><th>处理</th><th>协议 / 模型</th><th>大小 / 耗时</th><th>详情</th></tr></thead><tbody>' +
+      events.map(function(ev){
+        var detail = '';
+        if(ev.hits && ev.hits.length){
+          detail = '<div class="hits">' + ev.hits.map(function(h){
+            var cls = h.action && h.action !== 'mask' ? ' ' + esc(h.action) : '';
+            var frag = '<strong>' + esc(h.kind) + '</strong>';
+            if(h.by) frag += '<span>[' + esc(h.by) + ']</span>';
+            if(h.head) frag += '<span>' + esc(h.head) + '*** (' + (h.len || 0) + ' 字符)</span>';
+            else if((h.len || 0) > 0) frag += '<span>(' + h.len + ' 字符)</span>';
+            if(h.placeholder) frag += '<span>→ ' + esc(h.placeholder) + '</span>';
+            if(h.action && h.action !== 'mask') frag += '<span>(' + esc(actionLabel(h.action)) + ')</span>';
+            return '<span class="hit-pill' + cls + '">' + frag + '</span>';
+          }).join('') + '</div>';
+        } else if((ev.restored_count || 0) > 0){
+          detail = '<span class="badge badge-green">还原 ' + ev.restored_count + ' 处占位符</span>';
+        } else if(ev.error){
+          detail = '<span style="color:var(--red)" class="mono">' + esc(ev.error) + '</span>';
+        } else {
+          detail = '<span class="sub">无敏感命中，原样转发</span>';
+        }
+        return '<tr>' +
+          '<td class="mono" title="' + esc(ev.timestamp) + '">#' + (ev.id || 0) + ' ' + esc(shortTime(ev.timestamp)) + '</td>' +
+          '<td class="mono">' + esc(phaseLabel(ev.phase)) + '</td>' +
+          '<td><span class="badge ' + actionClass(ev.action) + '">' + esc(actionLabel(ev.action)) + '</span></td>' +
+          '<td class="mono">' + esc(ev.protocol || '-') + (ev.model ? ' / ' + esc(ev.model) : '') + '</td>' +
+          '<td class="mono">' + fmtBytes(ev.bytes || 0) + ' · ' + fmtMS(ev.duration_ms) + '</td>' +
+          '<td>' + detail + '</td>' +
+        '</tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+
+  window.loadStatus = async function(){
+    if(!state.key) return;
+    var url = STATUS_URL + '?events=50' + (state.actionFilter ? '&action=' + encodeURIComponent(state.actionFilter) : '');
+    try{
+      var resp = await fetch(url, {
+        headers: {'Authorization': 'Bearer ' + state.key, 'Accept': 'application/json'}
+      });
+      if(resp.status === 401 || resp.status === 403){
+        showAuth('管理密钥无效或无权限 (HTTP ' + resp.status + ')');
+        return;
+      }
+      var data = await resp.json();
+      if(!resp.ok){
+        document.getElementById('runtime-errors').innerHTML = '<div class="err-box">' + esc(data.error || ('HTTP ' + resp.status)) + '</div>';
+        return;
+      }
+      showApp();
+      renderStatus(data);
+    }catch(e){
+      if(document.getElementById('app').classList.contains('hidden')){
+        showAuth('请求失败: ' + e);
+      } else {
+        document.getElementById('runtime-errors').innerHTML = '<div class="err-box">刷新失败: ' + esc(e) + '</div>';
+      }
+    }
+  };
+
+  function stopAutoRefresh(){
+    if(state.autoTimer){
+      clearInterval(state.autoTimer);
+      state.autoTimer = null;
+    }
+    var btn = document.getElementById('auto-refresh-btn');
+    if(btn){
+      btn.classList.remove('active');
+      btn.textContent = '5s 自动刷新';
+    }
+  }
+
+  window.toggleAutoRefresh = function(){
+    if(state.autoTimer){
+      stopAutoRefresh();
+      return;
+    }
+    state.autoTimer = setInterval(window.loadStatus, 5000);
+    var btn = document.getElementById('auto-refresh-btn');
+    btn.classList.add('active');
+    btn.textContent = '停止自动刷新 (5s)';
+  };
+
+  window.openJSON = function(){
+    if(!state.lastStatus) return;
+    var blob = new Blob([JSON.stringify(state.lastStatus, null, 2)], {type: 'application/json'});
+    var url = URL.createObjectURL(blob);
+    window.open(url, '_blank', 'noopener');
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 30000);
+  };
+
+  window.disconnectKey = function(){
+    document.getElementById('secret-input').value = '';
+    showAuth('');
+  };
+
+  window.runPreview = async function(){
+    var input = document.getElementById('preview-input').value;
+    var out = document.getElementById('preview-out');
+    var meta = document.getElementById('preview-meta');
+    if(!input || !state.key) return;
+    meta.textContent = '处理中...';
+    try{
+      var resp = await fetch(PREVIEW_URL, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + state.key,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({text: input})
+      });
+      if(resp.status === 401 || resp.status === 403){
+        showAuth('管理密钥无效或无权限 (HTTP ' + resp.status + ')');
+        return;
+      }
+      var data = await resp.json();
+      out.style.display = 'block';
+      if(!resp.ok){
+        out.textContent = '错误: ' + (data.error || resp.status);
+        meta.textContent = '';
+        return;
+      }
+      var hits = (data.hits || []).map(function(h){
+        return '- ' + h.Kind + ' [' + (h.By || '-') + '] ' + (h.Action || 'mask') + ' ' + (h.Head ? h.Head + '*** ' : '') + '(' + h.Len + ' 字符) -> ' + (h.Placeholder || '');
+      }).join('\n');
+      out.textContent = '脱敏结果：\n' + data.masked + (hits ? '\n\n命中列表：\n' + hits : '\n\n命中列表：\n无');
+      meta.textContent = '耗时 ' + data.duration_ms + ' ms · 命中 ' + (data.hits ? data.hits.length : 0) + ' 项';
+    }catch(e){
+      out.style.display = 'block';
+      out.textContent = '请求失败: ' + e;
+      meta.textContent = '';
+    }
+  };
+
+  document.getElementById('auth-form').onsubmit = function(ev){
+    ev.preventDefault();
+    var val = document.getElementById('secret-input').value.trim();
+    if(!val) return;
+    state.key = val;
+    try{ sessionStorage.setItem(KEY_STORAGE, val); }catch(_){}
+    window.loadStatus();
+  };
+
+  try{
+    var saved = sessionStorage.getItem(KEY_STORAGE);
+    if(saved){
+      state.key = saved;
+      window.loadStatus();
+    }
+  }catch(_){}
+})();
 </script>
 </body>
 </html>

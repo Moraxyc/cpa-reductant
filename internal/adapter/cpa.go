@@ -22,6 +22,10 @@ const (
 	managementStatusPath  = "/cpa-reductant/status"
 	managementUIPath      = "/cpa-reductant/ui"
 	managementPreviewPath = "/cpa-reductant/preview"
+
+	resourceBasePath   = "/v0/resource/plugins/" + config.PluginID
+	resourceUIPath     = "/ui"
+	resourceUIFullPath = resourceBasePath + resourceUIPath
 )
 
 // requestPathMetadataKey matches CLIProxyAPI/sdk/cliproxy/executor.RequestPathMetadataKey.
@@ -193,6 +197,13 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 					Description: "Preview redaction on sample text using the active policy without storing placeholders",
 				},
 			},
+			Resources: []pluginapi.ResourceRoute{
+				{
+					Path:        resourceUIPath,
+					Menu:        config.PluginID,
+					Description: "状态监控与脱敏预览",
+				},
+			},
 		}, nil
 	case pluginabi.MethodManagementHandle:
 		var request pluginapi.ManagementRequest
@@ -215,6 +226,9 @@ func (p *Plugin) handleManagement(req pluginapi.ManagementRequest) pluginapi.Man
 	method := strings.ToUpper(strings.TrimSpace(req.Method))
 	if method == "" {
 		method = http.MethodGet
+	}
+	if method == http.MethodGet && isResourceUIPath(req.Path) {
+		return renderPortalHTML()
 	}
 	path := normalizeManagementPath(req.Path)
 	switch {
@@ -267,6 +281,15 @@ func (p *Plugin) handleManagement(req pluginapi.ManagementRequest) pluginapi.Man
 	default:
 		return jsonManagementResponse(http.StatusNotFound, map[string]string{"error": "route not found"})
 	}
+}
+
+func isResourceUIPath(raw string) bool {
+	path := strings.TrimSpace(raw)
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	path = strings.TrimRight(path, "/")
+	return path == resourceUIFullPath
 }
 
 func normalizeManagementPath(raw string) string {
