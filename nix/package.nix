@@ -54,6 +54,7 @@ buildGoModule (finalAttrs: {
 
   meta = {
     description = "CLIProxyAPI reversible redaction plugin powered by Magpie";
+    license = lib.licenses.mit;
     platforms = lib.platforms.linux ++ lib.platforms.darwin;
   };
 })

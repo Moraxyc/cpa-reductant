@@ -41,6 +41,8 @@ stdenv.mkDerivation {
     export CGO_ENABLED=1
     export GOOS=${lib.escapeShellArg goos}
     export GOARCH=${lib.escapeShellArg goarch}
+    export GOAMD64=v1
+    export GOARM64=v8.0
     export CC="zig cc -target ${zigTarget}"
     export CXX="zig c++ -target ${zigTarget}"
     go build -buildvcs=false -buildmode=c-shared -trimpath \

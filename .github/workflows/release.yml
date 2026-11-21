@@ -1,0 +1,177 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PLUGIN_ID: cpa-reductant
+
+jobs:
+  build-nix-portable:
+    name: Build Linux & Windows (Nix)
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    env:
+      ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT || secrets.ATTIC_ENDPOINT }}
+      ATTIC_CACHE: ${{ vars.ATTIC_CACHE || secrets.ATTIC_CACHE }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(tr -d '[:space:]' < VERSION)
+          if [[ "${GITHUB_REF}" == refs/tags/v* && "$version" != "${GITHUB_REF_NAME#v}" ]]; then
+            echo "VERSION ($version) != tag (${GITHUB_REF_NAME#v})" >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: wimpysworld/nothing-but-nix@v12
+        with:
+          hatchet-protocol: cleave
+
+      - uses: NixOS/nix-installer-action@v1
+        with:
+          extra-conf: |
+            build-dir = /nix/build
+
+      - if: ${{ env.ATTIC_ENDPOINT != '' && env.ATTIC_CACHE != '' }}
+        uses: ryanccn/attic-action@v0
+        with:
+          endpoint: ${{ env.ATTIC_ENDPOINT }}
+          cache: ${{ env.ATTIC_CACHE }}
+          token: ${{ secrets.ATTIC_TOKEN }}
+          inputs-from: .
+          skip-push: ${{ secrets.ATTIC_TOKEN == '' }}
+
+      - run: nix flake check --print-build-logs
+
+      - name: Build portable packages
+        run: |
+          set -euo pipefail
+          for target in linux-amd64 linux-arm64 windows-amd64 windows-arm64; do
+            nix build ".#portable-$target" -o "result-$target" --print-build-logs
+            platform="${target//-/_}"
+            mkdir -p "dist/$platform"
+            cp -L "result-$target/lib/${PLUGIN_ID}."* "dist/$platform/"
+            chmod 0755 "dist/$platform/${PLUGIN_ID}."*
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lib-nix-portable
+          path: dist/
+          if-no-files-found: error
+
+  build-darwin:
+    name: Build darwin/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            runner: macos-15-intel
+            cgo_cflags: -march=x86-64
+          - goarch: arm64
+            runner: macos-15
+            cgo_cflags: -march=armv8-a
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: bash scripts/prepare.sh
+      - run: go test -race ./internal/...
+
+      - name: Build shared library
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          GOAMD64: v1
+          GOARM64: v8.0
+          CGO_ENABLED: '1'
+          CGO_CFLAGS: ${{ matrix.cgo_cflags }}
+        run: |
+          set -euo pipefail
+          version=$(tr -d '[:space:]' < VERSION)
+          out="dist/darwin_${{ matrix.goarch }}"
+          mkdir -p "$out"
+          go build -buildvcs=false -buildmode=c-shared -trimpath \
+            -ldflags "-s -w -X github.com/moraxyc/cpa-reductant/internal/config.Version=${version}" \
+            -o "${out}/${PLUGIN_ID}.dylib" ./cmd/plugin
+          rm -f "${out}/${PLUGIN_ID}.h"
+          if otool -L "${out}/${PLUGIN_ID}.dylib" | grep -qE '/(opt/homebrew|usr/local|nix/store)/'; then
+            otool -L "${out}/${PLUGIN_ID}.dylib" >&2
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lib-darwin-${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: [build-nix-portable, build-darwin]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: lib-*
+          path: dist/lib
+          merge-multiple: true
+
+      - name: Package archives
+        env:
+          VERSION: ${{ needs.build-nix-portable.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/release
+          for platform in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64 windows_amd64 windows_arm64; do
+            zip -j -X -9 "dist/release/${PLUGIN_ID}_${VERSION}_${platform}.zip" "dist/lib/${platform}/${PLUGIN_ID}."*
+          done
+          (cd dist/release && sha256sum -- *.zip | sort -k2 > checksums.txt)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cpa-reductant-release-${{ needs.build-nix-portable.outputs.version }}
+          path: dist/release/
+          if-no-files-found: error
+
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ vars.APP_CLIENT_ID || vars.APP_ID || secrets.APP_CLIENT_ID || secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/release/*.zip dist/release/checksums.txt --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false
