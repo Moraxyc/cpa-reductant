@@ -53,8 +53,27 @@ plugins:
       enabled: true
       models: [your-existing-model] # 省略或 [] = 所有已配置模型
       protocols: []                 # 省略或 [] = 所有已支持的 CPA 通讯格式
+      secrets: true                 # 默认 true：脱敏密钥/Token/私钥/密码
+      personal: true                # 默认 true：脱敏内建个人隐私类别
+      kinds:                        # 可选：按类别覆盖个人隐私开关（home/userhost/ip/bucket 默认关闭）
+        ip: false
+        home: false
       words: [example-private-term]
-      block_terms: false # true 时拒绝命中自定义词的请求
+      words_any_case: false         # true 时忽略大小写匹配 words
+      words_whole: false            # true 时仅匹配完整词边界
+      # rules:                      # 可选：自定义前缀或正则脱敏规则（最多 32 条）
+      #   - kind: CORP_KEY
+      #     prefix: crp_
+      #   - kind: TICKET
+      #     regex: 'JIRA-\d{4,}'
+      # actions:                    # 可选：按占位符类型覆盖动作（mask | warn | block）
+      #   EMAIL: warn
+      #   PRIVATE_KEY: block
+      # allow: [ops@example.org]    # 可选：允许明文放行的精确值（仍受 words 优先保护）
+      shape: false                  # true 时使用保形伪造值替代 {{...}} 占位符
+      block_terms: false            # true 时拒绝命中自定义词的请求（等价 actions.TERM=block）
+      # key_path: /var/lib/cpa/reductant.key # 可选（或 CPA_REDUCTANT_KEY_PATH）：跨重启持久化占位符 HMAC 密钥
+      model:             # 可选：启用本地 PII 识别模型（默认关闭）
       model:             # 可选：启用本地 PII 识别模型（默认关闭）
         enabled: false
         name: astrlink-guard # 目前支持 astrlink-guard
@@ -72,6 +91,13 @@ plugins:
 - **权重目录布局**：`auto_download: true` 会将权重下载到 `<dir>/<rev[:12]>/` 并在版本升级后自动清理旧版本目录（与 Magpie 缓存结构兼容，可直接指向既有目录复用）；手动离线部署也可将 `model_int8.onnx`、`model_int8.onnx_data`、`tokenizer.json` 直接平铺放在 `<dir>/` 下。
 - **超时与降级保护**：按最新消息逆序与最短请求优先调度。非严格模式下超时会保留已扫描分块与规则兜底结果，并在后台完成当前分块写入缓存；严格模式下若模型缺失或损坏会返回 HTTP `503`（不触发 CPA 上游凭据冷却），若持续因新文本超时则临时收敛等待至 `2000ms` 避免长会话卡死。
 - **网络与镜像**：后台下载遵循 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量，支持 `Range` 断点续传与 SHA-256 校验，不阻塞 `plugin.register` 与正常请求处理。
+
+### 管理接口与可观测性
+
+插件向 CPA 注册了两条认证 Management API 路由（受 CPA `management.secret-key` 保护）：
+
+- `GET /v0/management/cpa-reductant/status`：返回插件版本、当前生效策略摘要（不含敏感词/白名单明文）、脱敏命中统计及本地 PII 模型加载/下载/缓存状态。
+- `POST /v0/management/cpa-reductant/preview`：接收 `{"text": "..."}`，以当前策略执行只读脱敏预览（不写入占位符记忆与统计），返回预览文本与命中元数据。
 
 ## 支持范围与限制
 

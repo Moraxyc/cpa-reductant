@@ -810,3 +810,94 @@ func TestModelUnavailableStrictReturns503WithoutUpstream(t *testing.T) {
 		t.Fatalf("shutdown: %v", err)
 	}
 }
+
+func TestManagementStatusAndPreview(t *testing.T) {
+	host := newFakeHost(nil)
+	p := NewPlugin(engine.New(nil), host)
+	regResp, err := p.Dispatch(pluginabi.MethodPluginRegister, mustJSON(t, map[string]any{
+		"config_yaml": []byte("words: [SYNTHETIC-MGMT-SECRET]\nactions:\n  EMAIL: warn\n"),
+	}))
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	caps := regResp.(map[string]any)["capabilities"].(map[string]any)
+	if caps["management_api"] != true {
+		t.Fatalf("expected management_api=true capability, got %#v", caps)
+	}
+
+	routesResp, err := p.Dispatch(pluginabi.MethodManagementRegister, nil)
+	if err != nil {
+		t.Fatalf("management.register: %v", err)
+	}
+	mgmtReg := routesResp.(pluginapi.ManagementRegistrationResponse)
+	if len(mgmtReg.Routes) != 2 {
+		t.Fatalf("expected 2 management routes, got %#v", mgmtReg.Routes)
+	}
+
+	// Trigger one mask so stats are non-zero.
+	if _, err := p.engine.MaskJSON("test-route", []byte(`{"text":"secret SYNTHETIC-MGMT-SECRET and mail bob@acme.io"}`)); err != nil {
+		t.Fatalf("MaskJSON: %v", err)
+	}
+
+	previewRespRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method: http.MethodPost,
+		Path:   "/v0/management/cpa-reductant/preview",
+		Body:   []byte(`{"text":"SYNTHETIC-MGMT-SECRET"}`),
+	}))
+	if err != nil {
+		t.Fatalf("management preview: %v", err)
+	}
+	previewResp := previewRespRaw.(pluginapi.ManagementResponse)
+	if previewResp.StatusCode != http.StatusOK {
+		t.Fatalf("preview status = %d, body=%s", previewResp.StatusCode, previewResp.Body)
+	}
+	var previewBody engine.PreviewResult
+	if err := json.Unmarshal(previewResp.Body, &previewBody); err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	if strings.Contains(previewBody.Masked, "SYNTHETIC-MGMT-SECRET") || len(previewBody.Hits) != 1 {
+		t.Fatalf("unexpected preview body: %+v", previewBody)
+	}
+
+	statusRespRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/management/cpa-reductant/status",
+	}))
+	if err != nil {
+		t.Fatalf("management status: %v", err)
+	}
+	statusResp := statusRespRaw.(pluginapi.ManagementResponse)
+	if statusResp.StatusCode != http.StatusOK {
+		t.Fatalf("status code = %d, body=%s", statusResp.StatusCode, statusResp.Body)
+	}
+	var st engine.Status
+	if err := json.Unmarshal(statusResp.Body, &st); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if st.Policy.WordsCount != 1 || st.Stats.RequestsTotal != 1 || st.Stats.HitsWarned != 1 {
+		t.Fatalf("unexpected management status: %+v", st)
+	}
+
+	badReqRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method: http.MethodPost,
+		Path:   "/v0/management/cpa-reductant/preview",
+		Body:   []byte(`{bad`),
+	}))
+	if err != nil {
+		t.Fatalf("management bad preview: %v", err)
+	}
+	if badReqRaw.(pluginapi.ManagementResponse).StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 on bad preview JSON, got %#v", badReqRaw)
+	}
+
+	notFoundRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/management/cpa-reductant/unknown",
+	}))
+	if err != nil {
+		t.Fatalf("management unknown route: %v", err)
+	}
+	if notFoundRaw.(pluginapi.ManagementResponse).StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 on unknown route, got %#v", notFoundRaw)
+	}
+}

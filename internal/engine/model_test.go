@@ -555,8 +555,8 @@ func TestAutoDownloadResumeAndMirrorFallback(t *testing.T) {
 
 	dl := newModelDownloader()
 	dl.files = []guard.PinnedFile{
-		{"int8/model_int8.onnx", int64(len(f1)), shaHex(f1)},
-		{"int8/tokenizer.json", int64(len(f2)), shaHex(f2)},
+		{Path: "int8/model_int8.onnx", Size: int64(len(f1)), SHA: shaHex(f1)},
+		{Path: "int8/tokenizer.json", Size: int64(len(f2)), SHA: shaHex(f2)},
 	}
 	dl.urlsFor = func(mirrorURL string, f guard.PinnedFile) []string {
 		return []string{primary.URL + "/" + f.Path, mirrorURL + "/" + f.Path}

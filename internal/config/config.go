@@ -11,6 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/yetone/magpie/pkg/guard"
+	"github.com/yetone/magpie/pkg/redact"
 	"gopkg.in/yaml.v3"
 )
 
@@ -33,6 +34,7 @@ const (
 
 	ModelAstrLinkGuard = "astrlink-guard"
 	EnvModelDir        = "CPA_REDUCTANT_MODEL_DIR"
+	EnvKeyPath         = "CPA_REDUCTANT_KEY_PATH"
 
 	DefaultModelWaitMS       = 2000
 	DefaultModelStrictWaitMS = 15000
@@ -122,16 +124,178 @@ func (m ModelConfig) Validate() error {
 	return nil
 }
 
+type RuleConfig struct {
+	Kind   string `yaml:"kind"`
+	Prefix string `yaml:"prefix"`
+	Regex  string `yaml:"regex"`
+}
+
 type Config struct {
-	Models     []string    `yaml:"models"`
-	Protocols  []string    `yaml:"protocols"`
-	Words      []string    `yaml:"words"`
-	BlockTerms bool        `yaml:"block_terms"`
-	Model      ModelConfig `yaml:"model"`
+	Models       []string          `yaml:"models"`
+	Protocols    []string          `yaml:"protocols"`
+	Secrets      *bool             `yaml:"secrets"`
+	Personal     *bool             `yaml:"personal"`
+	Kinds        map[string]bool   `yaml:"kinds"`
+	Words        []string          `yaml:"words"`
+	WordsAnyCase bool              `yaml:"words_any_case"`
+	WordsWhole   bool              `yaml:"words_whole"`
+	Rules        []RuleConfig      `yaml:"rules"`
+	Actions      map[string]string `yaml:"actions"`
+	Allow        []string          `yaml:"allow"`
+	Shape        bool              `yaml:"shape"`
+	BlockTerms   bool              `yaml:"block_terms"`
+	KeyPath      string            `yaml:"key_path"`
+	Model        ModelConfig       `yaml:"model"`
 }
 
 func SupportedProtocols() []string {
 	return slices.Clone(supportedProtocols)
+}
+
+func SupportedKinds() []string {
+	out := make([]string, 0, len(redact.Categories))
+	for _, c := range redact.Categories {
+		out = append(out, c.ID)
+	}
+	return out
+}
+
+func isValidKindCategory(id string) bool {
+	for _, c := range redact.Categories {
+		if c.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Config) EffectiveSecrets() bool {
+	if c == nil || c.Secrets == nil {
+		return true
+	}
+	return *c.Secrets
+}
+
+func (c *Config) EffectivePersonal() bool {
+	if c == nil || c.Personal == nil {
+		return true
+	}
+	return *c.Personal
+}
+
+func (c *Config) EffectiveKinds() map[string]bool {
+	if c == nil || len(c.Kinds) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(c.Kinds))
+	for k, v := range c.Kinds {
+		norm := strings.ToLower(strings.TrimSpace(k))
+		if norm != "" {
+			out[norm] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (c *Config) EffectiveRules() []redact.Rule {
+	if c == nil || len(c.Rules) == 0 {
+		return nil
+	}
+	raw := make([]redact.Rule, 0, len(c.Rules))
+	for _, r := range c.Rules {
+		raw = append(raw, redact.Rule{
+			Kind:   r.Kind,
+			Prefix: r.Prefix,
+			Regex:  r.Regex,
+		})
+	}
+	checked, err := redact.CheckRules(raw)
+	if err != nil {
+		return nil
+	}
+	return checked
+}
+
+func (c *Config) EffectiveActions() map[string]string {
+	if c == nil {
+		return nil
+	}
+	out := make(map[string]string)
+	hasTERM := false
+	for k, v := range c.Actions {
+		kind := strings.ToUpper(strings.TrimSpace(k))
+		if kind == "" {
+			continue
+		}
+		if kind == "TERM" {
+			hasTERM = true
+		}
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case redact.Warn:
+			out[kind] = redact.Warn
+		case redact.Block:
+			out[kind] = redact.Block
+		}
+	}
+	if c.BlockTerms && !hasTERM {
+		out["TERM"] = redact.Block
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (c *Config) EffectiveKeyPath() string {
+	if c != nil {
+		if kp := strings.TrimSpace(c.KeyPath); kp != "" {
+			return filepath.Clean(kp)
+		}
+	}
+	if envKP := strings.TrimSpace(os.Getenv(EnvKeyPath)); envKP != "" {
+		return filepath.Clean(envKP)
+	}
+	return ""
+}
+
+func (c *Config) validate() error {
+	if err := c.Model.Validate(); err != nil {
+		return err
+	}
+	for k := range c.Kinds {
+		norm := strings.ToLower(strings.TrimSpace(k))
+		if !isValidKindCategory(norm) {
+			return fmt.Errorf("unsupported personal data category %q (supported: %s)", k, strings.Join(SupportedKinds(), ", "))
+		}
+	}
+	if len(c.Rules) > 0 {
+		raw := make([]redact.Rule, 0, len(c.Rules))
+		for _, r := range c.Rules {
+			raw = append(raw, redact.Rule{
+				Kind:   r.Kind,
+				Prefix: r.Prefix,
+				Regex:  r.Regex,
+			})
+		}
+		if _, err := redact.CheckRules(raw); err != nil {
+			return err
+		}
+	}
+	for k, v := range c.Actions {
+		kind := strings.ToUpper(strings.TrimSpace(k))
+		if !redact.KindName(kind) {
+			return fmt.Errorf("invalid action kind %q (must match placeholder kind format, e.g. API_KEY, TERM)", k)
+		}
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "", "mask", redact.Warn, redact.Block:
+		default:
+			return fmt.Errorf("unsupported action %q for %s (expected mask, warn, or block)", v, kind)
+		}
+	}
+	return nil
 }
 
 func NormalizeProtocol(raw string) string {
@@ -160,7 +324,7 @@ func Parse(rawYAML []byte) (*Config, error) {
 			return nil, err
 		}
 	}
-	if err := cfg.Model.Validate(); err != nil {
+	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -198,8 +362,18 @@ func Metadata() pluginapi.Metadata {
 		ConfigFields: []pluginapi.ConfigField{
 			{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Exact model IDs (empty: all models)"},
 			{Name: "protocols", Type: pluginapi.ConfigFieldTypeArray, Description: "Exact protocol formats (empty: all supported CPA formats)"},
+			{Name: "secrets", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Mask secrets such as API keys, private keys, tokens, and passwords (default: true)"},
+			{Name: "personal", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Mask built-in personal data categories (default: true)"},
+			{Name: "kinds", Type: pluginapi.ConfigFieldTypeObject, Description: "Per-category personal data toggles (ssn, passport, iban, birthday, mac, serial, home, userhost, ip, bucket)"},
 			{Name: "words", Type: pluginapi.ConfigFieldTypeArray, Description: "Additional literal terms to protect"},
+			{Name: "words_any_case", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Match configured words case-insensitively"},
+			{Name: "words_whole", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Match configured words only on word boundaries"},
+			{Name: "rules", Type: pluginapi.ConfigFieldTypeArray, Description: "Custom masking rules ({kind, prefix | regex})"},
+			{Name: "actions", Type: pluginapi.ConfigFieldTypeObject, Description: "Per-kind policy overrides (kind -> mask | warn | block)"},
+			{Name: "allow", Type: pluginapi.ConfigFieldTypeArray, Description: "Literal values allowed unmasked (overridden by words)"},
+			{Name: "shape", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Use format-preserving synthetic stand-ins instead of {{...}} placeholders"},
 			{Name: "block_terms", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Reject instead of masking configured terms"},
+			{Name: "key_path", Type: pluginapi.ConfigFieldTypeString, Description: "Path to persist the 32-byte placeholder HMAC key across restarts"},
 			{Name: "model", Type: pluginapi.ConfigFieldTypeObject, Description: "Local PII detection model configuration (enabled, name, dir, min_score, strict, wait_ms, auto_download, mirror)"},
 		},
 	}

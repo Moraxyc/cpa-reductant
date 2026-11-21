@@ -118,3 +118,79 @@ model:
 		}
 	}
 }
+
+func TestRedactionPolicyConfigAndValidation(t *testing.T) {
+	t.Setenv(EnvKeyPath, "/tmp/from-env.key")
+	cfg, err := Parse([]byte(`
+secrets: false
+personal: true
+kinds:
+  ip: true
+  home: false
+words: [ProjectOrion]
+words_any_case: true
+words_whole: true
+rules:
+  - kind: CORP_KEY
+    prefix: crp_
+  - kind: TICKET
+    regex: 'JIRA-\d{4,}'
+actions:
+  email: warn
+  corp_key: block
+allow: [ops@example.org]
+shape: true
+block_terms: true
+`))
+	if err != nil {
+		t.Fatalf("parse policy config: %v", err)
+	}
+	if cfg.EffectiveSecrets() {
+		t.Fatal("expected secrets=false")
+	}
+	if !cfg.EffectivePersonal() {
+		t.Fatal("expected personal=true")
+	}
+	kinds := cfg.EffectiveKinds()
+	if !kinds["ip"] || kinds["home"] {
+		t.Fatalf("unexpected kinds: %#v", kinds)
+	}
+	if !cfg.WordsAnyCase || !cfg.WordsWhole || !cfg.Shape {
+		t.Fatalf("expected words_any_case, words_whole, shape to be true: %+v", cfg)
+	}
+	rules := cfg.EffectiveRules()
+	if len(rules) != 2 || rules[0].Kind != "CORP_KEY" || rules[1].Kind != "TICKET" {
+		t.Fatalf("unexpected rules: %#v", rules)
+	}
+	actions := cfg.EffectiveActions()
+	if actions["EMAIL"] != "warn" || actions["CORP_KEY"] != "block" || actions["TERM"] != "block" {
+		t.Fatalf("unexpected actions: %#v", actions)
+	}
+	if cfg.EffectiveKeyPath() != "/tmp/from-env.key" {
+		t.Fatalf("key_path = %q, want /tmp/from-env.key", cfg.EffectiveKeyPath())
+	}
+
+	explicitKeyCfg, err := Parse([]byte("key_path: /var/lib/cpa/reductant.key/\nactions:\n  term: warn\nblock_terms: true\n"))
+	if err != nil {
+		t.Fatalf("parse explicit key_path: %v", err)
+	}
+	if explicitKeyCfg.EffectiveKeyPath() != "/var/lib/cpa/reductant.key" {
+		t.Fatalf("explicit key_path = %q", explicitKeyCfg.EffectiveKeyPath())
+	}
+	if explicitKeyCfg.EffectiveActions()["TERM"] != "warn" {
+		t.Fatalf("expected explicit actions.TERM=warn to override block_terms, got %#v", explicitKeyCfg.EffectiveActions())
+	}
+
+	for _, bad := range []string{
+		"kinds:\n  nonexistent_cat: true\n",
+		"rules:\n  - kind: BAD\n    prefix: ab\n",
+		"rules:\n  - kind: BAD\n    regex: '[unclosed'\n",
+		"rules:\n  - kind: BAD\n    prefix: abc_\n    regex: 'abc_[0-9]+'\n",
+		"actions:\n  123_INVALID: block\n",
+		"actions:\n  EMAIL: drop\n",
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Fatalf("expected validation error for %q", bad)
+		}
+	}
+}

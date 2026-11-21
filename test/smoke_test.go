@@ -362,6 +362,7 @@ func writeHostConfig(t *testing.T, path, workDir, upstreamURL string, port int, 
   host: 127.0.0.1
   port: %d
 management:
+  secret-key: test-management-key
   disable-control-panel: true
 access:
   api-keys: [test-frontend-key]
@@ -913,6 +914,35 @@ func TestSmokeCPA(t *testing.T) {
 	if len(reqs) != reqCount || !strings.Contains(reqs[len(reqs)-1].Raw, smokeTerm) {
 		stop()
 		t.Fatalf("expected unselected model passthrough unmasked, got %+v", reqs[len(reqs)-1])
+	}
+
+	// 8. Plugin Management API (/v0/management/cpa-reductant/status & preview)
+	mgmtReq, _ := http.NewRequest(http.MethodGet, baseURL+"/v0/management/cpa-reductant/status", nil)
+	mgmtReq.Header.Set("Authorization", "Bearer test-management-key")
+	mgmtResp, err := (&http.Client{Timeout: 5 * time.Second}).Do(mgmtReq)
+	if err != nil {
+		stop()
+		t.Fatalf("management status GET: %v", err)
+	}
+	mgmtBody, _ := io.ReadAll(mgmtResp.Body)
+	_ = mgmtResp.Body.Close()
+	if mgmtResp.StatusCode != http.StatusOK || !strings.Contains(string(mgmtBody), `"requests_total"`) {
+		stop()
+		t.Fatalf("management status=%d body=%s", mgmtResp.StatusCode, mgmtBody)
+	}
+	previewReq, _ := http.NewRequest(http.MethodPost, baseURL+"/v0/management/cpa-reductant/preview", strings.NewReader(`{"text":"`+smokeTerm+`"}`))
+	previewReq.Header.Set("Authorization", "Bearer test-management-key")
+	previewReq.Header.Set("Content-Type", "application/json")
+	previewResp, err := (&http.Client{Timeout: 5 * time.Second}).Do(previewReq)
+	if err != nil {
+		stop()
+		t.Fatalf("management preview POST: %v", err)
+	}
+	previewBody, _ := io.ReadAll(previewResp.Body)
+	_ = previewResp.Body.Close()
+	if previewResp.StatusCode != http.StatusOK || strings.Contains(string(previewBody), smokeTerm) || !placeholderPattern.Match(previewBody) {
+		stop()
+		t.Fatalf("management preview status=%d body=%s", previewResp.StatusCode, previewBody)
 	}
 	stop()
 

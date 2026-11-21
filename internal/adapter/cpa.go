@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,12 @@ import (
 	"github.com/moraxyc/cpa-reductant/internal/engine"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+)
+
+const (
+	managementBasePath    = "/v0/management"
+	managementStatusPath  = "/cpa-reductant/status"
+	managementPreviewPath = "/cpa-reductant/preview"
 )
 
 // requestPathMetadataKey matches CLIProxyAPI/sdk/cliproxy/executor.RequestPathMetadataKey.
@@ -90,6 +97,7 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 				"executor_model_scope":    "static",
 				"executor_input_formats":  protocols,
 				"executor_output_formats": protocols,
+				"management_api":          true,
 			},
 		}, nil
 	case pluginabi.MethodPluginQuiesce:
@@ -142,6 +150,27 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 			Payload: p.engine.RestoreResponse(masked.ExitProtocol, reply.Headers.Get("Content-Type"), reply.Body),
 			Headers: restoredHeaders(reply.Headers),
 		}, nil
+	case pluginabi.MethodManagementRegister:
+		return pluginapi.ManagementRegistrationResponse{
+			Routes: []pluginapi.ManagementRoute{
+				{
+					Method:      http.MethodGet,
+					Path:        managementStatusPath,
+					Description: "Inspect cpa-reductant redaction policy, hit statistics, and local model status",
+				},
+				{
+					Method:      http.MethodPost,
+					Path:        managementPreviewPath,
+					Description: "Preview redaction on sample text using the active policy without storing placeholders",
+				},
+			},
+		}, nil
+	case pluginabi.MethodManagementHandle:
+		var request pluginapi.ManagementRequest
+		if err := json.Unmarshal(input, &request); err != nil {
+			return nil, err
+		}
+		return p.handleManagement(request), nil
 	case pluginabi.MethodExecutorCountTokens:
 		return nil, pluginabi.NewError(
 			pluginabi.ErrorCodeNotImplemented,
@@ -150,6 +179,66 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 		)
 	default:
 		return nil, fmt.Errorf("unknown method %q", method)
+	}
+}
+
+func (p *Plugin) handleManagement(req pluginapi.ManagementRequest) pluginapi.ManagementResponse {
+	method := strings.ToUpper(strings.TrimSpace(req.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	path := normalizeManagementPath(req.Path)
+	switch {
+	case method == http.MethodGet && path == managementStatusPath:
+		return jsonManagementResponse(http.StatusOK, p.engine.Status())
+	case method == http.MethodPost && path == managementPreviewPath:
+		var body struct {
+			Text string `json:"text"`
+		}
+		if len(bytes.TrimSpace(req.Body)) == 0 {
+			return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": "request body is required"})
+		}
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		}
+		res, err := p.engine.Preview(context.Background(), body.Text)
+		if err != nil {
+			if errors.Is(err, engine.ErrModelUnavailable) {
+				return jsonManagementResponse(http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+			}
+			return jsonManagementResponse(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		return jsonManagementResponse(http.StatusOK, res)
+	default:
+		return jsonManagementResponse(http.StatusNotFound, map[string]string{"error": "route not found"})
+	}
+}
+
+func normalizeManagementPath(raw string) string {
+	path := strings.TrimSpace(raw)
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	if strings.HasPrefix(path, managementBasePath+"/") {
+		path = strings.TrimPrefix(path, managementBasePath)
+	}
+	path = strings.TrimRight(path, "/")
+	if path == "" {
+		return "/"
+	}
+	return path
+}
+
+func jsonManagementResponse(status int, payload any) pluginapi.ManagementResponse {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		status = http.StatusInternalServerError
+		body = []byte(`{"error":"failed to marshal response"}`)
+	}
+	return pluginapi.ManagementResponse{
+		StatusCode: status,
+		Headers:    http.Header{"Content-Type": {"application/json"}},
+		Body:       body,
 	}
 }
 
