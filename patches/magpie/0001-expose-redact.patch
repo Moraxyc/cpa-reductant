@@ -1,0 +1,58 @@
+diff --git a/pkg/redact/redact.go b/pkg/redact/redact.go
+new file mode 100644
+index 0000000..c7e8c91
+--- /dev/null
++++ b/pkg/redact/redact.go
+@@ -0,0 +1,52 @@
++package redact
++
++import (
++	"net/http"
++
++	"github.com/yetone/magpie/internal/redact"
++)
++
++const (
++	ByRule   = redact.ByRule
++	ByYours  = redact.ByYours
++	ByWord   = redact.ByWord
++	ByModel  = redact.ByModel
++	ByKnown  = redact.ByKnown
++	Warn     = redact.Warn
++	Block    = redact.Block
++	MaxRules = redact.MaxRules
++	Scrubbed = redact.Scrubbed
++)
++
++type (
++	Options  = redact.Options
++	Hit      = redact.Hit
++	Rule     = redact.Rule
++	Writer   = redact.Writer
++	Model    = redact.Model
++	Found    = redact.Found
++	Category = redact.Category
++)
++
++var Categories = redact.Categories
++
++func HasPlaceholder(s string) bool                  { return redact.HasPlaceholder(s) }
++func SetKeyPath(path string)                        { redact.SetKeyPath(path) }
++func Value(p string) (string, bool)                 { return redact.Value(p) }
++func Hint(kind, v string) (string, int)             { return redact.Hint(kind, v) }
++func Mask(s string, o Options) (string, int)        { return redact.Mask(s, o) }
++func Preview(s string, o Options) string            { return redact.Preview(s, o) }
++func Restore(s string, escaped bool) string         { return redact.Restore(s, escaped) }
++func MaskJSON(body []byte, o Options) ([]byte, int) { return redact.MaskJSON(body, o) }
++func RestoreJSON(body []byte) []byte                { return redact.RestoreJSON(body) }
++func NewWriter(w http.ResponseWriter) *Writer       { return redact.NewWriter(w) }
++func RuleKind(kind string) string                   { return redact.RuleKind(kind) }
++func KindName(k string) bool                        { return redact.KindName(k) }
++func CheckRules(in []Rule) ([]Rule, error)          { return redact.CheckRules(in) }
++func SecretName(name string) bool                   { return redact.SecretName(name) }
++func Scrub(s string) string                         { return redact.Scrub(s) }
++func ScrubHeader(name, value string) string         { return redact.ScrubHeader(name, value) }
++func SecretHeader(name string) bool                 { return redact.SecretHeader(name) }
++func ScrubJSON(body []byte) []byte                  { return redact.ScrubJSON(body) }
++func CategoriesList() []Category                    { return redact.Categories }
++
