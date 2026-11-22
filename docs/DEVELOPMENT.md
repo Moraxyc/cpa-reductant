@@ -106,7 +106,7 @@ CPA_BIN=/path/to/cliproxyapi go test -v ./test/...
 
 ## CI 与发布流程
 
-- **CI（`.github/workflows/ci.yml`）**：在 `main` 分支与 PR 上运行 `nix flake check` 以及 Linux/Windows 的 portable 交叉编译。
+- **CI（`.github/workflows/ci.yml`）**：在 `main` 分支与 PR 上运行 `nix flake check`、Linux/Windows portable 交叉编译、脱离 Nix 的 `scripts/build.sh` 与 `go vet` 检查，以及 macOS（`darwin/amd64`、`darwin/arm64`）单测与动态库构建验证。
 - **Upstream Watch（`.github/workflows/upstream-watch.yml`）**：每周一、周四定时（或手动 `workflow_dispatch`）检查 `yetone/magpie` 与 `router-for-me/CLIProxyAPI` 新版本、试应用 `patches/magpie/*.patch`，并用最新 `nixpkgs` 的 `cliproxyapi` 试跑 `nix flake check`；发现需要适配时自动创建/更新带 `upstream-sync` 标签的跟踪 Issue，全部对齐后自动关闭。
 - **Release（`.github/workflows/release.yml`）**：推送 `v*` 标签（需与根目录 `VERSION` 文件一致）时触发，分别通过 Nix（Linux/Windows amd64 & arm64）与 macOS runner（darwin amd64 & arm64）构建 6 个平台产物，打包为 `cpa-reductant_<version>_<os>_<arch>.zip` 并生成 `checksums.txt` 发布到 GitHub Releases。
 

@@ -63,3 +63,95 @@ jobs:
           name: cpa-reductant-portable
           path: dist/
           if-no-files-found: error
+
+  native-linux:
+    name: Non-Nix Linux Build & Vet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Prepare patched Magpie
+        run: bash scripts/prepare.sh
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run unit tests with race detector
+        run: go test -race ./internal/...
+
+      - name: Build shared library via scripts/build.sh
+        run: |
+          set -euo pipefail
+          bash scripts/build.sh dist/native
+          test -s dist/native/cpa-reductant.so
+
+  darwin:
+    name: Build & Test darwin/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            runner: macos-15-intel
+            cgo_cflags: -march=x86-64
+          - goarch: arm64
+            runner: macos-15
+            cgo_cflags: -march=armv8-a
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Prepare patched Magpie
+        run: bash scripts/prepare.sh
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run unit tests with race detector
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '1'
+          CGO_CFLAGS: ${{ matrix.cgo_cflags }}
+        run: go test -race ./internal/...
+
+      - name: Build shared library
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          GOAMD64: v1
+          GOARM64: v8.0
+          CGO_ENABLED: '1'
+          CGO_CFLAGS: ${{ matrix.cgo_cflags }}
+        run: |
+          set -euo pipefail
+          version=$(tr -d '[:space:]' < VERSION)
+          out="dist/darwin_${{ matrix.goarch }}"
+          mkdir -p "$out"
+          go build -buildvcs=false -buildmode=c-shared -trimpath \
+            -ldflags "-s -w -X github.com/moraxyc/cpa-reductant/internal/config.Version=${version}" \
+            -o "${out}/cpa-reductant.dylib" ./cmd/plugin
+          rm -f "${out}/cpa-reductant.h"
+          if otool -L "${out}/cpa-reductant.dylib" | grep -qE '/(opt/homebrew|usr/local|nix/store)/'; then
+            otool -L "${out}/cpa-reductant.dylib" >&2
+            exit 1
+          fi
+
+      - name: Upload darwin artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: cpa-reductant-darwin-${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
