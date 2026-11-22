@@ -26,6 +26,7 @@ const (
 	smokeCodexModel        = "gpt-5-codex-test"
 	smokeGeminiModel       = "gemini-2.5-test"
 	smokeInteractionsModel = "gemini-2.5-interactions-test"
+	smokeInteractionsAgent = "agents/test-agent"
 	smokeImageModel        = "grok-imagine-image"
 	smokeSpeechModel       = "grok-tts"
 	smokeVideoModel        = "grok-imagine-video"
@@ -112,6 +113,9 @@ func (m *mockProvider) handle(w http.ResponseWriter, r *http.Request) {
 
 	case strings.HasSuffix(r.URL.Path, "/responses"):
 		m.handleResponses(w, body, text)
+
+	case strings.Contains(r.URL.Path, ":countTokens"):
+		writeJSON(w, map[string]any{"totalTokens": 42})
 
 	case strings.Contains(r.URL.Path, ":generateContent"):
 		writeJSON(w, map[string]any{
@@ -402,6 +406,7 @@ api-keys:
       proxy-url: direct
       models:
         - name: %s
+        - name: gemini-2.5-flash
       keys:
         - api-key: test-upstream-key
   xai:
@@ -428,7 +433,7 @@ plugins:
   configs:
     cpa-reductant:
       enabled: true
-      models: [%s, %s, %s, %s, %s, %s, %s, %s]
+      models: [%s, %s, %s, %s, %s, %s, %s, %s, %s]
       words: [%s, %s]
       block_terms: %t
 `,
@@ -441,7 +446,7 @@ plugins:
 		upstreamURL, smokeImageModel, smokeSpeechModel, smokeVideoModel,
 		upstreamURL, smokeOpenAIModel,
 		filepath.Join(workDir, "plugins"),
-		smokeClaudeModel, smokeOpenAIModel, smokeCodexModel, smokeGeminiModel, smokeInteractionsModel, smokeImageModel, smokeSpeechModel, smokeVideoModel,
+		smokeClaudeModel, smokeOpenAIModel, smokeCodexModel, smokeGeminiModel, smokeInteractionsModel, smokeInteractionsAgent, smokeImageModel, smokeSpeechModel, smokeVideoModel,
 		smokeTerm, smokeBlockedTerm, blockTerms,
 	)
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
@@ -623,13 +628,40 @@ func TestSmokeCPA(t *testing.T) {
 	reqCount++
 	expectLastUpstreamMasked(t, upstream, reqCount, "/v1/messages")
 
+	// Verify Claude /v1/messages/count_tokens increments requests_masked before local estimation / upstream call.
+	getRequestsMasked := func() int64 {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, baseURL+"/v0/management/cpa-reductant/status", nil)
+		req.Header.Set("Authorization", "Bearer test-management-key")
+		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+		if err != nil {
+			stop()
+			t.Fatalf("status GET: %v", err)
+		}
+		defer resp.Body.Close()
+		var st struct {
+			Stats struct {
+				RequestsMasked int64 `json:"requests_masked"`
+			} `json:"stats"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+			stop()
+			t.Fatalf("decode status: %v", err)
+		}
+		return st.Stats.RequestsMasked
+	}
+	maskedBeforeCount := getRequestsMasked()
 	status, body = doJSONPost(t, baseURL+"/v1/messages/count_tokens", claudeHeaders, map[string]any{
 		"model":    smokeClaudeModel,
-		"messages": []map[string]any{{"role": "user", "content": "hello"}},
+		"messages": []map[string]any{{"role": "user", "content": smokeTerm}},
 	})
 	if status != http.StatusOK || !strings.Contains(string(body), `"input_tokens"`) {
 		stop()
 		t.Fatalf("Claude count_tokens status=%d body=%s", status, body)
+	}
+	if maskedAfterCount := getRequestsMasked(); maskedAfterCount != maskedBeforeCount+1 {
+		stop()
+		t.Fatalf("expected Claude count_tokens to increment requests_masked (%d -> %d)", maskedBeforeCount, maskedAfterCount)
 	}
 	reqCount = len(upstream.Requests())
 
@@ -811,6 +843,30 @@ func TestSmokeCPA(t *testing.T) {
 	reqCount++
 	expectLastUpstreamMasked(t, upstream, reqCount, ":streamGenerateContent")
 
+	// 4b. Gemini :countTokens (both direct contents and generateContentRequest)
+	status, body = doJSONPost(t, baseURL+"/v1beta/models/"+smokeGeminiModel+":countTokens", nil, map[string]any{
+		"contents": []map[string]any{{"role": "user", "parts": []map[string]any{{"text": smokeTerm}}}},
+	})
+	if status != http.StatusOK || !strings.Contains(string(body), `"totalTokens"`) {
+		stop()
+		t.Fatalf("Gemini countTokens contents status=%d body=%s", status, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, ":countTokens")
+
+	status, body = doJSONPost(t, baseURL+"/v1beta/models/"+smokeGeminiModel+":countTokens", nil, map[string]any{
+		"generateContentRequest": map[string]any{
+			"model":    "models/" + smokeGeminiModel,
+			"contents": []map[string]any{{"role": "user", "parts": []map[string]any{{"text": smokeTerm}}}},
+		},
+	})
+	if status != http.StatusOK || !strings.Contains(string(body), `"totalTokens"`) {
+		stop()
+		t.Fatalf("Gemini countTokens generateContentRequest status=%d body=%s", status, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, ":countTokens")
+
 	// 5. Interactions /v1beta/interactions (JSON & SSE)
 	status, body = doJSONPost(t, baseURL+"/v1beta/interactions", nil, map[string]any{
 		"model": smokeInteractionsModel,
@@ -860,6 +916,59 @@ func TestSmokeCPA(t *testing.T) {
 	if intText.String() != smokeTerm || !sawIntDone {
 		stop()
 		t.Fatalf("Interactions SSE restored=%q completed=%t\n%s", intText.String(), sawIntDone, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/interactions")
+
+	// 5b. Interactions /v1beta/interactions with agent (JSON & SSE)
+	status, body = doJSONPost(t, baseURL+"/v1beta/interactions", nil, map[string]any{
+		"agent": smokeInteractionsAgent,
+		"input": smokeTerm,
+	})
+	if status != http.StatusOK || !strings.Contains(string(body), smokeTerm) {
+		stop()
+		t.Fatalf("Interactions agent JSON status=%d body=%s", status, body)
+	}
+	reqCount++
+	expectLastUpstreamMasked(t, upstream, reqCount, "/interactions")
+
+	status, body = doJSONPost(t, baseURL+"/v1beta/interactions", nil, map[string]any{
+		"agent":  smokeInteractionsAgent,
+		"stream": true,
+		"input":  smokeTerm,
+	})
+	if status != http.StatusOK {
+		stop()
+		t.Fatalf("Interactions agent SSE status=%d body=%s", status, body)
+	}
+	var intAgentText strings.Builder
+	sawIntAgentDone := false
+	scanner = bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var frame struct {
+			EventType string `json:"event_type"`
+			Delta     struct {
+				Text string `json:"text"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &frame); err != nil {
+			stop()
+			t.Fatalf("decode Interactions agent SSE %q: %v", line, err)
+		}
+		if frame.EventType == "step.delta" {
+			intAgentText.WriteString(frame.Delta.Text)
+		}
+		if frame.EventType == "interaction.completed" {
+			sawIntAgentDone = true
+		}
+	}
+	if intAgentText.String() != smokeTerm || !sawIntAgentDone {
+		stop()
+		t.Fatalf("Interactions agent SSE restored=%q completed=%t\n%s", intAgentText.String(), sawIntAgentDone, body)
 	}
 	reqCount++
 	expectLastUpstreamMasked(t, upstream, reqCount, "/interactions")
@@ -1024,6 +1133,23 @@ func TestSmokeCPA(t *testing.T) {
 		{
 			url:  baseURL + "/v1beta/models/" + smokeGeminiModel + ":generateContent",
 			body: map[string]any{"contents": []map[string]any{{"role": "user", "parts": []map[string]any{{"text": smokeBlockedTerm}}}}},
+		},
+		{
+			url:     baseURL + "/v1/messages/count_tokens",
+			headers: claudeHeaders,
+			body:    map[string]any{"model": smokeClaudeModel, "messages": []map[string]any{{"role": "user", "content": smokeBlockedTerm}}},
+		},
+		{
+			url:  baseURL + "/v1beta/models/" + smokeGeminiModel + ":countTokens",
+			body: map[string]any{"contents": []map[string]any{{"role": "user", "parts": []map[string]any{{"text": smokeBlockedTerm}}}}},
+		},
+		{
+			url:  baseURL + "/v1beta/models/" + smokeGeminiModel + ":countTokens",
+			body: map[string]any{"generateContentRequest": map[string]any{"model": "models/" + smokeGeminiModel, "contents": []map[string]any{{"role": "user", "parts": []map[string]any{{"text": smokeBlockedTerm}}}}}},
+		},
+		{
+			url:  baseURL + "/v1beta/interactions",
+			body: map[string]any{"agent": smokeInteractionsAgent, "input": smokeBlockedTerm},
 		},
 	}
 	for _, br := range blockRequests {
