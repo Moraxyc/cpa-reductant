@@ -42,6 +42,7 @@ type HostCaller interface {
 type routeRequest struct {
 	SourceFormat   string         `json:"SourceFormat"`
 	RequestedModel string         `json:"RequestedModel"`
+	Stream         bool           `json:"Stream"`
 	Body           []byte         `json:"Body"`
 	Metadata       map[string]any `json:"Metadata"`
 }
@@ -195,7 +196,7 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 			return nil, err
 		}
 		protocol := config.NormalizeProtocol(request.SourceFormat)
-		if !p.engine.Config().AllowsModel(protocol, request.RequestedModel) || shouldSkipRoute(protocol, request.Body, request.Metadata) {
+		if !p.engine.Config().AllowsModel(protocol, request.RequestedModel) || shouldSkipRoute(protocol, request.Stream, request.Body, request.Metadata) {
 			return pluginapi.ModelRouteResponse{}, nil
 		}
 		return pluginapi.ModelRouteResponse{
@@ -509,14 +510,14 @@ func noStoreJSONManagementResponse(status int, payload any) pluginapi.Management
 	return resp
 }
 
-func shouldSkipRoute(protocol string, body []byte, metadata map[string]any) bool {
+func shouldSkipRoute(protocol string, stream bool, body []byte, metadata map[string]any) bool {
 	if reqPath, _ := metadata[requestPathMetadataKey].(string); strings.HasSuffix(strings.TrimSpace(reqPath), "/count_tokens") {
 		return true
 	}
 	if protocol == config.ProtocolInteractions && isInteractionsAgentRequest(body) {
 		return true
 	}
-	if protocol == config.ProtocolGemini && hasJSONKey(body, "generateContentRequest") {
+	if protocol == config.ProtocolGemini && !stream {
 		return true
 	}
 	return false
@@ -587,7 +588,7 @@ func (p *Plugin) handleRequestInterceptBefore(req requestInterceptRequest) plugi
 	if requestedModel == "" {
 		requestedModel = strings.TrimSpace(req.Model)
 	}
-	if !p.engine.Config().AllowsModel(protocol, requestedModel) || !shouldSkipRoute(protocol, req.Body, req.Metadata) {
+	if !p.engine.Config().AllowsModel(protocol, requestedModel) || !shouldSkipRoute(protocol, req.Stream, req.Body, req.Metadata) {
 		return pluginapi.RequestInterceptResponse{}
 	}
 	if !json.Valid(req.Body) {
@@ -800,18 +801,6 @@ func isInteractionsAgentRequest(body []byte) bool {
 		return false
 	}
 	return strings.TrimSpace(payload.Agent) != "" && strings.TrimSpace(payload.Model) == ""
-}
-
-func hasJSONKey(body []byte, key string) bool {
-	if len(body) == 0 {
-		return false
-	}
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return false
-	}
-	raw, ok := payload[key]
-	return ok && len(bytes.TrimSpace(raw)) > 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
 func (p *Plugin) prepareModelRequest(request executorRequest, stream bool) (modelRequest, error) {

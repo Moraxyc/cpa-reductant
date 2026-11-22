@@ -324,6 +324,7 @@ func TestModelRouteSupportedAndSkippedCases(t *testing.T) {
 		resp, err := p.Dispatch(pluginabi.MethodModelRoute, mustJSON(t, routeRequest{
 			SourceFormat:   format,
 			RequestedModel: "any-model",
+			Stream:         format == config.ProtocolGemini,
 			Body:           []byte(`{"model":"any-model"}`),
 		}))
 		if err != nil || !resp.(pluginapi.ModelRouteResponse).Handled {
@@ -353,10 +354,20 @@ func TestModelRouteSupportedAndSkippedCases(t *testing.T) {
 			},
 		},
 		{
+			name: "gemini non-stream generateContent",
+			req: routeRequest{
+				SourceFormat:   config.ProtocolGemini,
+				RequestedModel: "gemini-2.5-flash",
+				Stream:         false,
+				Body:           []byte(`{"contents":[]}`),
+			},
+		},
+		{
 			name: "gemini generateContentRequest",
 			req: routeRequest{
 				SourceFormat:   config.ProtocolGemini,
 				RequestedModel: "gemini-2.5-flash",
+				Stream:         false,
 				Body:           []byte(`{"generateContentRequest":{"contents":[]}}`),
 			},
 		},
