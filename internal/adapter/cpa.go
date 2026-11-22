@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/moraxyc/cpa-reductant/internal/config"
 	"github.com/moraxyc/cpa-reductant/internal/engine"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/yetone/magpie/pkg/redact"
 )
 
 const (
@@ -44,6 +46,26 @@ type routeRequest struct {
 	Metadata       map[string]any `json:"Metadata"`
 }
 
+type requestInterceptRequest struct {
+	pluginapi.RequestInterceptRequest
+	HostCallbackID string `json:"host_callback_id"`
+}
+
+type responseInterceptRequest struct {
+	pluginapi.ResponseInterceptRequest
+	HostCallbackID string `json:"host_callback_id"`
+}
+
+type streamChunkInterceptRequest struct {
+	pluginapi.StreamChunkInterceptRequest
+	HostCallbackID string `json:"host_callback_id"`
+}
+
+type requestCompletionRequest struct {
+	pluginapi.RequestCompletion
+	HostCallbackID string `json:"host_callback_id"`
+}
+
 type executorRequest struct {
 	pluginapi.ExecutorRequest
 	HostCallbackID string `json:"host_callback_id"`
@@ -64,14 +86,38 @@ type streamUpdate struct {
 }
 
 type Plugin struct {
-	engine *engine.Engine
-	host   HostCaller
+	engine     *engine.Engine
+	host       HostCaller
+	sessionsMu sync.Mutex
+	sessions   map[string]*interceptSession
+}
+
+type interceptSession struct {
+	mu             sync.Mutex
+	protocol       string
+	model          string
+	stream         bool
+	captureID      uint64
+	hostCallbackID string
+	startedAt      time.Time
+
+	streamInit   bool
+	writer       *redact.Writer
+	buffer       *sseBuffer
+	normalizer   streamPayloadNormalizer
+	contentType  string
+	upstreamCap  *engine.CaptureBuffer
+	restoredCap  *engine.CaptureBuffer
+	bytesOut     int
+	lastCapFlush time.Time
+	captureDirty bool
 }
 
 func NewPlugin(eng *engine.Engine, host HostCaller) *Plugin {
 	p := &Plugin{
-		engine: eng,
-		host:   host,
+		engine:   eng,
+		host:     host,
+		sessions: make(map[string]*interceptSession),
 	}
 	if eng != nil && host != nil {
 		eng.SetLogger(func(level, callbackID, msg string, fields map[string]any) {
@@ -92,7 +138,13 @@ func NewPlugin(eng *engine.Engine, host HostCaller) *Plugin {
 }
 
 func (p *Plugin) Shutdown() {
-	if p != nil && p.engine != nil {
+	if p == nil {
+		return
+	}
+	p.sessionsMu.Lock()
+	clear(p.sessions)
+	p.sessionsMu.Unlock()
+	if p.engine != nil {
 		p.engine.Close()
 	}
 }
@@ -118,12 +170,16 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 			"schema_version": pluginabi.SchemaVersion,
 			"metadata":       config.Metadata(),
 			"capabilities": map[string]any{
-				"model_router":            true,
-				"executor":                true,
-				"executor_model_scope":    "static",
-				"executor_input_formats":  protocols,
-				"executor_output_formats": protocols,
-				"management_api":          true,
+				"model_router":                true,
+				"executor":                    true,
+				"executor_model_scope":        "static",
+				"executor_input_formats":      protocols,
+				"executor_output_formats":     protocols,
+				"request_interceptor":         true,
+				"request_lifecycle_plugin":    true,
+				"response_interceptor":        true,
+				"response_stream_interceptor": true,
+				"management_api":              true,
 			},
 		}, nil
 	case pluginabi.MethodPluginQuiesce:
@@ -139,13 +195,40 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 			return nil, err
 		}
 		protocol := config.NormalizeProtocol(request.SourceFormat)
-		if !p.engine.Config().AllowsModel(protocol, request.RequestedModel) || shouldSkipRoute(protocol, request) {
+		if !p.engine.Config().AllowsModel(protocol, request.RequestedModel) || shouldSkipRoute(protocol, request.Body, request.Metadata) {
 			return pluginapi.ModelRouteResponse{}, nil
 		}
 		return pluginapi.ModelRouteResponse{
 			Handled:    true,
 			TargetKind: pluginapi.ModelRouteTargetSelf,
 		}, nil
+	case pluginabi.MethodRequestInterceptBefore:
+		var request requestInterceptRequest
+		if err := json.Unmarshal(input, &request); err != nil {
+			return nil, err
+		}
+		return p.handleRequestInterceptBefore(request), nil
+	case pluginabi.MethodRequestInterceptAfter:
+		return pluginapi.RequestInterceptResponse{}, nil
+	case pluginabi.MethodResponseInterceptAfter:
+		var request responseInterceptRequest
+		if err := json.Unmarshal(input, &request); err != nil {
+			return nil, err
+		}
+		return p.handleResponseInterceptAfter(request), nil
+	case pluginabi.MethodResponseInterceptStreamChunk:
+		var request streamChunkInterceptRequest
+		if err := json.Unmarshal(input, &request); err != nil {
+			return nil, err
+		}
+		return p.handleResponseInterceptStreamChunk(request), nil
+	case pluginabi.MethodRequestComplete:
+		var request requestCompletionRequest
+		if err := json.Unmarshal(input, &request); err != nil {
+			return nil, err
+		}
+		p.handleRequestComplete(request)
+		return map[string]any{}, nil
 	case pluginabi.MethodExecutorExecute, pluginabi.MethodExecutorExecuteStream:
 		var request executorRequest
 		if err := json.Unmarshal(input, &request); err != nil {
@@ -426,17 +509,283 @@ func noStoreJSONManagementResponse(status int, payload any) pluginapi.Management
 	return resp
 }
 
-func shouldSkipRoute(protocol string, request routeRequest) bool {
-	if reqPath, _ := request.Metadata[requestPathMetadataKey].(string); strings.HasSuffix(strings.TrimSpace(reqPath), "/count_tokens") {
+func shouldSkipRoute(protocol string, body []byte, metadata map[string]any) bool {
+	if reqPath, _ := metadata[requestPathMetadataKey].(string); strings.HasSuffix(strings.TrimSpace(reqPath), "/count_tokens") {
 		return true
 	}
-	if protocol == config.ProtocolInteractions && isInteractionsAgentRequest(request.Body) {
+	if protocol == config.ProtocolInteractions && isInteractionsAgentRequest(body) {
 		return true
 	}
-	if protocol == config.ProtocolGemini && hasJSONKey(request.Body, "generateContentRequest") {
+	if protocol == config.ProtocolGemini && hasJSONKey(body, "generateContentRequest") {
 		return true
 	}
 	return false
+}
+
+func (p *Plugin) putSession(requestID string, sess *interceptSession) {
+	if requestID == "" || sess == nil {
+		return
+	}
+	p.sessionsMu.Lock()
+	defer p.sessionsMu.Unlock()
+	if p.sessions == nil {
+		p.sessions = make(map[string]*interceptSession)
+	}
+	// Safety cap if a host omits request.complete callbacks.
+	if len(p.sessions) >= 1024 {
+		cutoff := time.Now().Add(-30 * time.Minute)
+		for id, existing := range p.sessions {
+			if existing.startedAt.Before(cutoff) {
+				delete(p.sessions, id)
+			}
+		}
+	}
+	p.sessions[requestID] = sess
+}
+
+func (p *Plugin) getSession(requestID string) *interceptSession {
+	if requestID == "" {
+		return nil
+	}
+	p.sessionsMu.Lock()
+	defer p.sessionsMu.Unlock()
+	return p.sessions[requestID]
+}
+
+func (p *Plugin) popSession(requestID string) *interceptSession {
+	if requestID == "" {
+		return nil
+	}
+	p.sessionsMu.Lock()
+	defer p.sessionsMu.Unlock()
+	sess := p.sessions[requestID]
+	if sess != nil {
+		delete(p.sessions, requestID)
+	}
+	return sess
+}
+
+func jsonTerminationResponse(status int, errType, code, msg string) pluginapi.RequestInterceptResponse {
+	body, _ := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": msg,
+			"type":    errType,
+			"code":    code,
+		},
+	})
+	return pluginapi.RequestInterceptResponse{
+		Terminate:       true,
+		StatusCode:      status,
+		ResponseHeaders: http.Header{"Content-Type": {"application/json"}},
+		ResponseBody:    body,
+	}
+}
+
+func (p *Plugin) handleRequestInterceptBefore(req requestInterceptRequest) pluginapi.RequestInterceptResponse {
+	protocol := config.NormalizeProtocol(req.SourceFormat)
+	requestedModel := strings.TrimSpace(req.RequestedModel)
+	if requestedModel == "" {
+		requestedModel = strings.TrimSpace(req.Model)
+	}
+	if !p.engine.Config().AllowsModel(protocol, requestedModel) || !shouldSkipRoute(protocol, req.Body, req.Metadata) {
+		return pluginapi.RequestInterceptResponse{}
+	}
+	if !json.Valid(req.Body) {
+		return jsonTerminationResponse(http.StatusBadRequest, "invalid_request_error", "invalid_json", "expected a JSON body")
+	}
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = requestedModel
+	}
+	captureID := p.engine.BeginCapture()
+	masked, err := p.engine.MaskRequest(context.Background(), engine.RequestMeta{
+		Route:          model,
+		Protocol:       protocol,
+		Model:          model,
+		Stream:         req.Stream,
+		HostCallbackID: req.HostCallbackID,
+		CaptureID:      captureID,
+	}, req.Body)
+	if err != nil {
+		if errors.Is(err, engine.ErrBlocked) {
+			return jsonTerminationResponse(http.StatusBadRequest, "invalid_request_error", "redaction_blocked", err.Error())
+		}
+		if errors.Is(err, engine.ErrModelUnavailable) {
+			return jsonTerminationResponse(http.StatusServiceUnavailable, "api_error", pluginabi.ErrorCodeRequestScoped, err.Error())
+		}
+		return jsonTerminationResponse(http.StatusInternalServerError, "api_error", "redaction_error", err.Error())
+	}
+	p.putSession(req.RequestID, &interceptSession{
+		protocol:       protocol,
+		model:          model,
+		stream:         req.Stream,
+		captureID:      captureID,
+		hostCallbackID: req.HostCallbackID,
+		startedAt:      time.Now(),
+	})
+	return pluginapi.RequestInterceptResponse{Body: masked}
+}
+
+func (p *Plugin) handleResponseInterceptAfter(req responseInterceptRequest) pluginapi.ResponseInterceptResponse {
+	if req.Kind == pluginapi.ResponseInterceptKindModelList {
+		return pluginapi.ResponseInterceptResponse{}
+	}
+	sess := p.popSession(req.RequestID)
+	if sess == nil {
+		return pluginapi.ResponseInterceptResponse{}
+	}
+	callbackID := req.HostCallbackID
+	if callbackID == "" {
+		callbackID = sess.hostCallbackID
+	}
+	restored, restoredCount := p.engine.RestoreResponseWithMeta(engine.RequestMeta{
+		Protocol:       sess.protocol,
+		Model:          sess.model,
+		HostCallbackID: callbackID,
+		CaptureID:      sess.captureID,
+	}, req.ResponseHeaders.Get("Content-Type"), req.Body)
+	if restoredCount == 0 && bytes.Equal(restored, req.Body) {
+		return pluginapi.ResponseInterceptResponse{}
+	}
+	return pluginapi.ResponseInterceptResponse{Body: restored}
+}
+
+func (s *interceptSession) initStream(eng *engine.Engine, respHeaders http.Header) {
+	if s.streamInit {
+		return
+	}
+	s.streamInit = true
+	s.contentType = respHeaders.Get("Content-Type")
+	s.buffer = &sseBuffer{headers: writerHeadersForStream(respHeaders, s.protocol, "")}
+	s.writer = eng.NewStreamWriter(s.buffer)
+	s.normalizer = streamPayloadNormalizer{
+		exitProtocol: s.protocol,
+		contentType:  s.contentType,
+	}
+	if s.captureID != 0 {
+		limit := engine.MaxCaptureBodyBytes()
+		s.upstreamCap = engine.NewCaptureBuffer(limit)
+		s.restoredCap = engine.NewCaptureBuffer(limit)
+		eng.MarkCaptureStreaming(s.captureID, s.contentType)
+	}
+}
+
+func (p *Plugin) handleResponseInterceptStreamChunk(req streamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+	sess := p.getSession(req.RequestID)
+	if sess == nil {
+		return pluginapi.StreamChunkInterceptResponse{}
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex {
+		sess.initStream(p.engine, req.ResponseHeaders)
+		return pluginapi.StreamChunkInterceptResponse{}
+	}
+	if !sess.streamInit {
+		sess.initStream(p.engine, req.ResponseHeaders)
+	}
+	if len(req.Body) == 0 {
+		return pluginapi.StreamChunkInterceptResponse{}
+	}
+	if sess.upstreamCap != nil {
+		sess.upstreamCap.Write(req.Body)
+		sess.captureDirty = true
+	}
+	payload := sess.normalizer.Normalize(req.Body)
+	if _, err := sess.writer.Write(payload); err != nil {
+		return pluginapi.StreamChunkInterceptResponse{}
+	}
+	if sess.buffer.Len() == 0 {
+		return pluginapi.StreamChunkInterceptResponse{DropChunk: true}
+	}
+	outBytes := bytes.Clone(sess.buffer.Bytes())
+	sess.bytesOut += len(outBytes)
+	if sess.restoredCap != nil {
+		sess.restoredCap.Write(outBytes)
+		sess.captureDirty = true
+	}
+	sess.buffer.Reset()
+	if sess.captureID != 0 && sess.captureDirty && (sess.lastCapFlush.IsZero() || time.Since(sess.lastCapFlush) >= streamCaptureFlushInterval) {
+		upBytes, upTotal, upTrunc := sess.upstreamCap.Snapshot()
+		resBytes, resTotal, resTrunc := sess.restoredCap.Snapshot()
+		p.engine.RecordStreamCaptureProgress(
+			sess.captureID,
+			sess.contentType,
+			upBytes,
+			upTotal,
+			upTrunc,
+			resBytes,
+			resTotal,
+			resTrunc,
+			sess.writer.Put(),
+			time.Since(sess.startedAt),
+		)
+		sess.lastCapFlush = time.Now()
+		sess.captureDirty = false
+	}
+	return pluginapi.StreamChunkInterceptResponse{Body: outBytes}
+}
+
+func (p *Plugin) handleRequestComplete(req requestCompletionRequest) {
+	sess := p.popSession(req.RequestID)
+	if sess == nil {
+		return
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	callbackID := req.HostCallbackID
+	if callbackID == "" {
+		callbackID = sess.hostCallbackID
+	}
+	var completionErr error
+	if req.Outcome != pluginapi.RequestCompletionSucceeded {
+		msg := strings.TrimSpace(req.Error)
+		if msg == "" {
+			msg = fmt.Sprintf("request %s", req.Outcome)
+		}
+		completionErr = errors.New(msg)
+	}
+	if sess.stream && sess.streamInit && sess.writer != nil {
+		sess.writer.Finish()
+		if sess.buffer.Len() > 0 {
+			outBytes := bytes.Clone(sess.buffer.Bytes())
+			sess.bytesOut += len(outBytes)
+			if sess.restoredCap != nil {
+				sess.restoredCap.Write(outBytes)
+			}
+			sess.buffer.Reset()
+		}
+		dur := time.Since(sess.startedAt)
+		put := sess.writer.Put()
+		p.engine.RecordStreamRestore(engine.RequestMeta{
+			Protocol:       sess.protocol,
+			Model:          sess.model,
+			Stream:         true,
+			HostCallbackID: callbackID,
+			CaptureID:      sess.captureID,
+		}, sess.bytesOut, put, dur, completionErr)
+		if sess.captureID != 0 {
+			upBytes, upTotal, upTrunc := sess.upstreamCap.Snapshot()
+			resBytes, resTotal, resTrunc := sess.restoredCap.Snapshot()
+			p.engine.RecordStreamCapture(
+				sess.captureID,
+				sess.contentType,
+				upBytes,
+				upTotal,
+				upTrunc,
+				resBytes,
+				resTotal,
+				resTrunc,
+				put,
+				dur,
+				completionErr,
+			)
+		}
+		return
+	}
+	if completionErr != nil && sess.captureID != 0 {
+		p.engine.CaptureError(sess.captureID, completionErr)
+	}
 }
 
 func isInteractionsAgentRequest(body []byte) bool {

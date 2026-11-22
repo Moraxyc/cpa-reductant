@@ -314,6 +314,12 @@ func TestModelRouteSupportedAndSkippedCases(t *testing.T) {
 		t.Fatalf("unexpected formats: in=%v out=%v", inputs, outputs)
 	}
 
+	for _, capKey := range []string{"request_interceptor", "request_lifecycle_plugin", "response_interceptor", "response_stream_interceptor"} {
+		if caps[capKey] != true {
+			t.Fatalf("expected capability %s=true, got %#v", capKey, caps[capKey])
+		}
+	}
+
 	for _, format := range config.SupportedProtocols() {
 		resp, err := p.Dispatch(pluginabi.MethodModelRoute, mustJSON(t, routeRequest{
 			SourceFormat:   format,
