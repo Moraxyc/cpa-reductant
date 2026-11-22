@@ -218,11 +218,11 @@ model:
 
 ### 已支持的协议与端点（含 JSON 与流式 SSE）
 
-- `claude`：`/v1/messages`（`/v1/messages/count_tokens` 透传原生计数）
+- `claude`：`/v1/messages`、`/v1/messages/count_tokens`
 - `openai`：`/v1/chat/completions`、`/v1/completions`
 - `openai-response`：`/v1/responses`、`/v1/responses/compact`、`/backend-api/codex/responses`（支持 WebSocket `/v1/responses` 客户端接入，上游转发回退为 HTTP）
-- `gemini`：`/v1beta/models/*:generateContent`、`:streamGenerateContent`
-- `interactions`：`/v1beta/interactions`（`model` 请求脱敏；`agent` 原生请求透传）
+- `gemini`：`/v1beta/models/*:generateContent`、`:streamGenerateContent`、`:countTokens`
+- `interactions`：`/v1beta/interactions`（同时支持 `model` 与 `agent` 请求）
 - `openai-image` / `openai-speech` / `openai-video`：文生图/改图、TTS（保留二进制音频响应）、视频生成
 - `codex` / `antigravity`：SDK 内部格式
 
@@ -230,7 +230,6 @@ model:
 
 - 本地 PII 模型当前仅支持 `astrlink-guard`（CPU / macOS CoreML），暂未接入依赖独立 `pf-serve` 进程的 `privacy-filter` 与 Linux Vulkan/GPU 加速。
 - 暂不支持 CPA Home 模式与 `/v1/alpha/search`（CPA 原生限制）。
-- `count_tokens` 与 `interactions` `agent` 请求会直接透传原生处理，不做脱敏。
 - 占位符还原映射在进程内共享，暂未按多租户隔离；插件未加载或路由失败时，CPA 会回退原生路由直出。
 
 ---
