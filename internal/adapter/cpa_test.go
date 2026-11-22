@@ -1404,3 +1404,349 @@ func TestManagementModelDownloadRoute(t *testing.T) {
 		t.Fatalf("unexpected model status: %+v", st)
 	}
 }
+
+func TestInterceptorFallbackCountTokensGeminiAndNoOps(t *testing.T) {
+	term := "SYNTHETIC-INTERCEPT-TERM"
+	host := newFakeHost(nil)
+	p := NewPlugin(engine.New(nil), host)
+	defer p.Shutdown()
+
+	if _, err := p.Dispatch(pluginabi.MethodPluginRegister, mustJSON(t, map[string]any{
+		"config_yaml": []byte("models: [claude-sonnet-test, gemini-2.5-flash, agents/test-agent]\nwords: [" + term + "]\n"),
+	})); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// 1. Normal model_router request must be a no-op in interceptor hooks.
+	noopBefore, err := p.Dispatch(pluginabi.MethodRequestInterceptBefore, mustJSON(t, requestInterceptRequest{
+		RequestInterceptRequest: pluginapi.RequestInterceptRequest{
+			RequestID:      "req-routed",
+			SourceFormat:   config.ProtocolClaude,
+			Model:          "claude-sonnet-test",
+			RequestedModel: "claude-sonnet-test",
+			Body:           mustJSON(t, map[string]any{"model": "claude-sonnet-test", "messages": []any{map[string]any{"role": "user", "content": term}}}),
+			Metadata:       map[string]any{requestPathMetadataKey: "/v1/messages"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("noop intercept before: %v", err)
+	}
+	if resp := noopBefore.(pluginapi.RequestInterceptResponse); resp.Terminate || len(resp.Body) != 0 {
+		t.Fatalf("expected routed request to be a no-op in intercept_before, got %+v", resp)
+	}
+	if p.getSession("req-routed") != nil {
+		t.Fatal("expected no fallback session for routed request")
+	}
+
+	// 2. model_list response must be a no-op.
+	modelListResp, err := p.Dispatch(pluginabi.MethodResponseInterceptAfter, mustJSON(t, responseInterceptRequest{
+		ResponseInterceptRequest: pluginapi.ResponseInterceptRequest{
+			Kind:         pluginapi.ResponseInterceptKindModelList,
+			RequestID:    "req-models",
+			SourceFormat: config.ProtocolOpenAI,
+			Body:         []byte(`{"data":[]}`),
+		},
+	}))
+	if err != nil || len(modelListResp.(pluginapi.ResponseInterceptResponse).Body) != 0 {
+		t.Fatalf("expected model_list to be untouched, got %#v err=%v", modelListResp, err)
+	}
+
+	// 3. Claude /v1/messages/count_tokens is masked before auth and cleaned up on response.
+	beforeCount, err := p.Dispatch(pluginabi.MethodRequestInterceptBefore, mustJSON(t, requestInterceptRequest{
+		RequestInterceptRequest: pluginapi.RequestInterceptRequest{
+			RequestID:      "req-claude-count",
+			SourceFormat:   config.ProtocolClaude,
+			Model:          "claude-sonnet-test",
+			RequestedModel: "claude-sonnet-test",
+			Body:           mustJSON(t, map[string]any{"model": "claude-sonnet-test", "messages": []any{map[string]any{"role": "user", "content": term}}}),
+			Metadata:       map[string]any{requestPathMetadataKey: "/v1/messages/count_tokens"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("claude count intercept before: %v", err)
+	}
+	maskedCount := beforeCount.(pluginapi.RequestInterceptResponse)
+	if maskedCount.Terminate || len(maskedCount.Body) == 0 || strings.Contains(string(maskedCount.Body), term) {
+		t.Fatalf("expected masked claude count_tokens body without %q, got %s", term, maskedCount.Body)
+	}
+	afterCount, err := p.Dispatch(pluginabi.MethodResponseInterceptAfter, mustJSON(t, responseInterceptRequest{
+		ResponseInterceptRequest: pluginapi.ResponseInterceptRequest{
+			Kind:            pluginapi.ResponseInterceptKindCountTokens,
+			RequestID:       "req-claude-count",
+			SourceFormat:    config.ProtocolClaude,
+			Model:           "claude-sonnet-test",
+			RequestedModel:  "claude-sonnet-test",
+			ResponseHeaders: http.Header{"Content-Type": {"application/json"}},
+			Body:            []byte(`{"input_tokens":42}`),
+		},
+	}))
+	if err != nil {
+		t.Fatalf("claude count intercept after: %v", err)
+	}
+	if len(afterCount.(pluginapi.ResponseInterceptResponse).Body) != 0 {
+		t.Fatalf("expected unchanged count_tokens response body, got %s", afterCount.(pluginapi.ResponseInterceptResponse).Body)
+	}
+	if p.getSession("req-claude-count") != nil {
+		t.Fatal("expected session popped after response_intercept_after")
+	}
+
+	// 4. Gemini non-stream generateContent (and countTokens) masked & restored.
+	beforeGem, err := p.Dispatch(pluginabi.MethodRequestInterceptBefore, mustJSON(t, requestInterceptRequest{
+		RequestInterceptRequest: pluginapi.RequestInterceptRequest{
+			RequestID:      "req-gemini-nonstream",
+			SourceFormat:   config.ProtocolGemini,
+			Model:          "gemini-2.5-flash",
+			RequestedModel: "gemini-2.5-flash",
+			Stream:         false,
+			Body:           mustJSON(t, map[string]any{"contents": []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": term}}}}}),
+			Metadata:       map[string]any{requestPathMetadataKey: "/v1beta/models/*action"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("gemini intercept before: %v", err)
+	}
+	maskedGem := string(beforeGem.(pluginapi.RequestInterceptResponse).Body)
+	if strings.Contains(maskedGem, term) {
+		t.Fatalf("expected masked gemini body, got %s", maskedGem)
+	}
+	var gemMap map[string]any
+	if err := json.Unmarshal([]byte(maskedGem), &gemMap); err != nil {
+		t.Fatalf("decode masked gemini: %v", err)
+	}
+	placeholder := gemMap["contents"].([]any)[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["text"].(string)
+
+	afterGem, err := p.Dispatch(pluginabi.MethodResponseInterceptAfter, mustJSON(t, responseInterceptRequest{
+		ResponseInterceptRequest: pluginapi.ResponseInterceptRequest{
+			Kind:            pluginapi.ResponseInterceptKindExecution,
+			RequestID:       "req-gemini-nonstream",
+			SourceFormat:    config.ProtocolGemini,
+			Model:           "gemini-2.5-flash",
+			RequestedModel:  "gemini-2.5-flash",
+			ResponseHeaders: http.Header{"Content-Type": {"application/json"}},
+			Body:            mustJSON(t, map[string]any{"candidates": []any{map[string]any{"content": map[string]any{"parts": []any{map[string]any{"text": placeholder}}}}}}),
+		},
+	}))
+	if err != nil {
+		t.Fatalf("gemini intercept after: %v", err)
+	}
+	restoredGem := string(afterGem.(pluginapi.ResponseInterceptResponse).Body)
+	if !strings.Contains(restoredGem, term) {
+		t.Fatalf("expected restored gemini response with %q, got %s", term, restoredGem)
+	}
+
+	// 5. Blocked terms terminate with HTTP 400 JSON without creating a session.
+	if _, err := p.Dispatch(pluginabi.MethodPluginReconfigure, mustJSON(t, map[string]any{
+		"config_yaml": []byte("models: [claude-sonnet-test, gemini-2.5-flash, agents/test-agent]\nwords: [" + term + "]\nblock_terms: true\n"),
+	})); err != nil {
+		t.Fatalf("reconfigure: %v", err)
+	}
+	blockedRespRaw, err := p.Dispatch(pluginabi.MethodRequestInterceptBefore, mustJSON(t, requestInterceptRequest{
+		RequestInterceptRequest: pluginapi.RequestInterceptRequest{
+			RequestID:      "req-blocked",
+			SourceFormat:   config.ProtocolInteractions,
+			Model:          "agents/test-agent",
+			RequestedModel: "agents/test-agent",
+			Body:           mustJSON(t, map[string]any{"agent": "agents/test-agent", "input": term}),
+		},
+	}))
+	if err != nil {
+		t.Fatalf("blocked intercept before: %v", err)
+	}
+	blockedResp := blockedRespRaw.(pluginapi.RequestInterceptResponse)
+	if !blockedResp.Terminate || blockedResp.StatusCode != http.StatusBadRequest || !strings.Contains(string(blockedResp.ResponseBody), "request blocked by redaction policy") {
+		t.Fatalf("expected 400 terminate response, got %+v", blockedResp)
+	}
+	if p.getSession("req-blocked") != nil {
+		t.Fatal("expected no session created on terminated request")
+	}
+
+	// 6. Strict unavailable local model terminates with HTTP 503.
+	missingDir := filepath.Join(t.TempDir(), "missing-model")
+	if _, err := p.Dispatch(pluginabi.MethodPluginReconfigure, mustJSON(t, map[string]any{
+		"config_yaml": []byte("models: [claude-sonnet-test]\nmodel:\n  enabled: true\n  auto_download: false\n  strict: true\n  dir: " + missingDir + "\n"),
+	})); err != nil {
+		t.Fatalf("reconfigure strict: %v", err)
+	}
+	unavailRaw, err := p.Dispatch(pluginabi.MethodRequestInterceptBefore, mustJSON(t, requestInterceptRequest{
+		RequestInterceptRequest: pluginapi.RequestInterceptRequest{
+			RequestID:      "req-unavail",
+			SourceFormat:   config.ProtocolClaude,
+			Model:          "claude-sonnet-test",
+			RequestedModel: "claude-sonnet-test",
+			Body:           []byte(`{"model":"claude-sonnet-test","messages":[{"role":"user","content":"hello"}]}`),
+			Metadata:       map[string]any{requestPathMetadataKey: "/v1/messages/count_tokens"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("strict unavail intercept before: %v", err)
+	}
+	unavailResp := unavailRaw.(pluginapi.RequestInterceptResponse)
+	if !unavailResp.Terminate || unavailResp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 terminate response, got %+v", unavailResp)
+	}
+}
+
+func TestInterceptorFallbackInteractionsAgentStreamAndCleanup(t *testing.T) {
+	term := "SYNTHETIC-AGENT-STREAM-SECRET"
+	host := newFakeHost(nil)
+	p := NewPlugin(engine.New(&config.Config{
+		Words: []string{term},
+	}), host)
+	defer p.Shutdown()
+
+	p.engine.ConfigureDebugCapture(true, time.Minute, 10, false)
+
+	reqID := "req-agent-stream-1"
+	beforeRaw, err := p.Dispatch(pluginabi.MethodRequestInterceptBefore, mustJSON(t, requestInterceptRequest{
+		RequestInterceptRequest: pluginapi.RequestInterceptRequest{
+			RequestID:      reqID,
+			SourceFormat:   config.ProtocolInteractions,
+			Model:          "agents/researcher",
+			RequestedModel: "agents/researcher",
+			Stream:         true,
+			Body:           mustJSON(t, map[string]any{"agent": "agents/researcher", "stream": true, "input": term}),
+			Metadata:       map[string]any{requestPathMetadataKey: "/v1beta/interactions"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("intercept before: %v", err)
+	}
+	before := beforeRaw.(pluginapi.RequestInterceptResponse)
+	if before.Terminate || strings.Contains(string(before.Body), term) {
+		t.Fatalf("expected masked interactions agent request, got %+v", before)
+	}
+	var maskedPayload map[string]any
+	if err := json.Unmarshal(before.Body, &maskedPayload); err != nil {
+		t.Fatalf("decode masked payload: %v", err)
+	}
+	placeholder := maskedPayload["input"].(string)
+	mid := len(placeholder) / 2
+
+	// Header init
+	initRaw, err := p.Dispatch(pluginabi.MethodResponseInterceptStreamChunk, mustJSON(t, streamChunkInterceptRequest{
+		StreamChunkInterceptRequest: pluginapi.StreamChunkInterceptRequest{
+			RequestID:       reqID,
+			SourceFormat:    config.ProtocolInteractions,
+			Model:           "agents/researcher",
+			RequestedModel:  "agents/researcher",
+			ResponseHeaders: http.Header{"Content-Type": {"text/event-stream"}},
+			ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+		},
+	}))
+	if err != nil || initRaw.(pluginapi.StreamChunkInterceptResponse).DropChunk {
+		t.Fatalf("header init: %#v err=%v", initRaw, err)
+	}
+
+	// Chunk 0: first half of split placeholder -> held (DropChunk=true)
+	c0Raw, err := p.Dispatch(pluginabi.MethodResponseInterceptStreamChunk, mustJSON(t, streamChunkInterceptRequest{
+		StreamChunkInterceptRequest: pluginapi.StreamChunkInterceptRequest{
+			RequestID:  reqID,
+			ChunkIndex: 0,
+			Body: []byte("event: step.delta\ndata: " + string(mustJSON(t, map[string]any{
+				"type":       "step.delta",
+				"event_type": "step.delta",
+				"index":      0,
+				"delta":      map[string]any{"type": "text", "text": placeholder[:mid]},
+			})) + "\n\n"),
+		},
+	}))
+	if err != nil {
+		t.Fatalf("chunk 0: %v", err)
+	}
+	c0 := c0Raw.(pluginapi.StreamChunkInterceptResponse)
+	if !c0.DropChunk || len(c0.Body) != 0 {
+		t.Fatalf("expected chunk 0 to be held with DropChunk=true, got %+v", c0)
+	}
+
+	// Chunk 1: second half -> restored combined events
+	c1Raw, err := p.Dispatch(pluginabi.MethodResponseInterceptStreamChunk, mustJSON(t, streamChunkInterceptRequest{
+		StreamChunkInterceptRequest: pluginapi.StreamChunkInterceptRequest{
+			RequestID:  reqID,
+			ChunkIndex: 1,
+			Body: []byte("event: step.delta\ndata: " + string(mustJSON(t, map[string]any{
+				"type":       "step.delta",
+				"event_type": "step.delta",
+				"index":      0,
+				"delta":      map[string]any{"type": "text", "text": placeholder[mid:]},
+			})) + "\n\n"),
+		},
+	}))
+	if err != nil {
+		t.Fatalf("chunk 1: %v", err)
+	}
+	c1 := c1Raw.(pluginapi.StreamChunkInterceptResponse)
+	if c1.DropChunk || !strings.Contains(string(c1.Body), term) {
+		t.Fatalf("expected chunk 1 to emit restored %q, got drop=%t body=%s", term, c1.DropChunk, c1.Body)
+	}
+
+	// Chunk 2: interaction.completed
+	c2Raw, err := p.Dispatch(pluginabi.MethodResponseInterceptStreamChunk, mustJSON(t, streamChunkInterceptRequest{
+		StreamChunkInterceptRequest: pluginapi.StreamChunkInterceptRequest{
+			RequestID:  reqID,
+			ChunkIndex: 2,
+			Body:       []byte("event: interaction.completed\ndata: {\"type\":\"interaction.completed\",\"event_type\":\"interaction.completed\"}\n\n"),
+		},
+	}))
+	if err != nil {
+		t.Fatalf("chunk 2: %v", err)
+	}
+	if !strings.Contains(string(c2Raw.(pluginapi.StreamChunkInterceptResponse).Body), "interaction.completed") {
+		t.Fatalf("expected interaction.completed in chunk 2, got %s", c2Raw.(pluginapi.StreamChunkInterceptResponse).Body)
+	}
+
+	// Request complete records telemetry & capture and removes session.
+	if _, err := p.Dispatch(pluginabi.MethodRequestComplete, mustJSON(t, requestCompletionRequest{
+		RequestCompletion: pluginapi.RequestCompletion{
+			RequestID:    reqID,
+			SourceFormat: config.ProtocolInteractions,
+			Model:        "agents/researcher",
+			Stream:       true,
+			Outcome:      pluginapi.RequestCompletionSucceeded,
+			StatusCode:   http.StatusOK,
+		},
+	})); err != nil {
+		t.Fatalf("request complete: %v", err)
+	}
+	if p.getSession(reqID) != nil {
+		t.Fatal("expected session removed on request.complete")
+	}
+	st := p.engine.Status()
+	if st.Stats.StreamsTotal != 1 || st.Stats.StreamsRestored != 1 || st.Stats.PlaceholdersRestored < 1 {
+		t.Fatalf("expected stream restore telemetry, got %+v", st.Stats)
+	}
+	snap := p.engine.DebugCaptureSnapshot(10, 0, "", "")
+	if len(snap.Entries) != 1 || snap.Entries[0].Status != "done" || !strings.Contains(snap.Entries[0].RestoredResponse, term) {
+		t.Fatalf("expected capture done with restored response, got %+v", snap.Entries)
+	}
+
+	// Failed non-stream session records capture error on request.complete.
+	failID := "req-gemini-fail"
+	if _, err := p.Dispatch(pluginabi.MethodRequestInterceptBefore, mustJSON(t, requestInterceptRequest{
+		RequestInterceptRequest: pluginapi.RequestInterceptRequest{
+			RequestID:      failID,
+			SourceFormat:   config.ProtocolGemini,
+			Model:          "gemini-2.5-flash",
+			RequestedModel: "gemini-2.5-flash",
+			Body:           []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+		},
+	})); err != nil {
+		t.Fatalf("fail intercept before: %v", err)
+	}
+	if _, err := p.Dispatch(pluginabi.MethodRequestComplete, mustJSON(t, requestCompletionRequest{
+		RequestCompletion: pluginapi.RequestCompletion{
+			RequestID:  failID,
+			Outcome:    pluginapi.RequestCompletionFailed,
+			StatusCode: http.StatusBadGateway,
+			Error:      "upstream 502",
+		},
+	})); err != nil {
+		t.Fatalf("fail request complete: %v", err)
+	}
+	if p.getSession(failID) != nil {
+		t.Fatal("expected failed session removed")
+	}
+	snap = p.engine.DebugCaptureSnapshot(10, 0, "", "")
+	if len(snap.Entries) != 2 || snap.Entries[0].Status != "error" || !strings.Contains(snap.Entries[0].Error, "upstream 502") {
+		t.Fatalf("expected error capture entry on failed request, got %+v", snap.Entries)
+	}
+}
