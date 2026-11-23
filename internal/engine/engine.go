@@ -592,7 +592,7 @@ func (e *Engine) redactOptions(ctx context.Context, cfg *config.Config, route st
 	}
 	if cfg.Model.Enabled && e.model != nil {
 		options.MinScore = cfg.Model.EffectiveMinScore()
-		options.NamesByModel = cfg.Model.EffectiveName() == config.ModelAstrLinkGuard
+		options.NamesByModel = !cfg.Model.IsRemoteHTTP() && cfg.Model.EffectiveName() == config.ModelAstrLinkGuard
 		options.Model = func(texts []string) [][]redact.Found {
 			found, ferr := e.model.Find(ctx, cfg.Model, texts)
 			if ferr != nil {

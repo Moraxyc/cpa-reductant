@@ -186,6 +186,10 @@ model:
 		"model:\n  wait_ms: -1\n",
 		"model:\n  mirror: not-a-url\n",
 		"model:\n  mirror: ftp://example.com\n",
+		"model:\n  provider: unknown-provider\n",
+		"model:\n  enabled: true\n  provider: http\n",
+		"model:\n  enabled: true\n  provider: http\n  endpoint: ftp://ner.local/analyze\n",
+		"model:\n  enabled: true\n  provider: http\n  endpoint: http://ner.local/analyze\n  format: spacy\n",
 	} {
 		if _, err := Parse([]byte(bad)); err == nil {
 			t.Fatalf("expected error for %q", bad)

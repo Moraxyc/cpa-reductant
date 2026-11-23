@@ -43,7 +43,9 @@ type spanFinder interface {
 // ModelStatus exposes runtime observability for the local PII model.
 type ModelStatus struct {
 	Enabled         bool           `json:"enabled"`
+	Provider        string         `json:"provider,omitempty"`
 	Name            string         `json:"name"`
+	Format          string         `json:"format,omitempty"`
 	Revision        string         `json:"revision,omitempty"`
 	Strict          bool           `json:"strict"`
 	AutoDownload    bool           `json:"auto_download"`
@@ -177,9 +179,17 @@ func (r *modelRunner) Configure(cfg config.ModelConfig) {
 	r.mu.Lock()
 	prevDir := r.cfg.EffectiveDir()
 	prevMirror := r.cfg.Mirror
+	prevProvider := r.cfg.EffectiveProvider()
+	prevEndpoint := strings.TrimSpace(r.cfg.Endpoint)
+	prevFormat := r.cfg.EffectiveFormat()
+	prevLang := r.cfg.EffectiveLanguage()
 	nextDir := cfg.EffectiveDir()
 	dirChanged := prevDir != nextDir
-	if !cfg.Enabled || dirChanged {
+	backendChanged := prevProvider != cfg.EffectiveProvider() ||
+		prevEndpoint != strings.TrimSpace(cfg.Endpoint) ||
+		prevFormat != cfg.EffectiveFormat() ||
+		prevLang != cfg.EffectiveLanguage()
+	if !cfg.Enabled || dirChanged || backendChanged {
 		r.loaded = nil
 		r.loadedDir = ""
 		r.lastErr = nil
@@ -187,23 +197,25 @@ func (r *modelRunner) Configure(cfg config.ModelConfig) {
 		r.retryAt = time.Time{}
 		r.behindAt.Store(0)
 	}
-	if !cfg.Enabled || dirChanged || cfg.EffectiveAutoDownload() != r.cfg.EffectiveAutoDownload() || cfg.Strict != r.cfg.Strict {
+	if !cfg.Enabled || dirChanged || backendChanged || cfg.EffectiveAutoDownload() != r.cfg.EffectiveAutoDownload() || cfg.Strict != r.cfg.Strict {
 		r.missingWarned = false
 	}
 	r.cfg = cfg
 	r.mu.Unlock()
 
-	if !cfg.Enabled || dirChanged || prevMirror != cfg.Mirror {
+	if !cfg.Enabled || dirChanged || backendChanged || prevMirror != cfg.Mirror {
 		r.downloader.Reset()
 	}
-	if dirChanged {
-		r.disk.flush(prevDir, r.cache)
+	if dirChanged || backendChanged {
+		if prevDir != "" {
+			r.disk.flush(prevDir, r.cache)
+		}
 		r.disk.reset()
 		r.cache.clear()
 	} else if !cfg.Enabled && prevDir != "" {
 		r.disk.flush(prevDir, r.cache)
 	}
-	if cfg.Enabled {
+	if cfg.Enabled && !cfg.IsRemoteHTTP() {
 		if cfg.EffectiveAutoDownload() {
 			r.maybeDownload(cfg)
 		} else if !modelInstalled(nextDir) {
@@ -250,14 +262,30 @@ func (r *modelRunner) Status() ModelStatus {
 	if t := r.behindAt.Load(); t != 0 && time.Since(time.Unix(0, t)) < behindAge {
 		behind = true
 	}
-	resolvedDir, layout, installed := resolveModelDirWithLayout(dir)
-	if !cfg.Enabled && !installed {
-		layout = "disabled"
+	var resolvedDir, layout, revision, format string
+	var installed bool
+	if cfg.IsRemoteHTTP() {
+		format = cfg.EffectiveFormat()
+		installed = strings.TrimSpace(cfg.Endpoint) != ""
+		loaded = cfg.Enabled && installed
+		if cfg.Enabled {
+			layout = "remote-http"
+		} else {
+			layout = "disabled"
+		}
+	} else {
+		revision = guard.Rev[:12]
+		resolvedDir, layout, installed = resolveModelDirWithLayout(dir)
+		if !cfg.Enabled && !installed {
+			layout = "disabled"
+		}
 	}
 	return ModelStatus{
 		Enabled:         cfg.Enabled,
+		Provider:        cfg.EffectiveProvider(),
 		Name:            cfg.EffectiveName(),
-		Revision:        guard.Rev[:12],
+		Format:          format,
+		Revision:        revision,
 		Strict:          cfg.Strict,
 		AutoDownload:    cfg.EffectiveAutoDownload(),
 		MinScore:        cfg.EffectiveMinScore(),
@@ -308,6 +336,9 @@ func (r *modelRunner) TriggerDownload(mirrorOverride string) error {
 	r.mu.Lock()
 	cfg := r.cfg
 	r.mu.Unlock()
+	if cfg.IsRemoteHTTP() {
+		return errors.New("model download is only supported for local astrlink-guard")
+	}
 	dir := cfg.EffectiveDir()
 	if dir == "" {
 		return errors.New("model directory could not be resolved; set model.dir or CPA_REDUCTANT_MODEL_DIR")
@@ -426,6 +457,27 @@ func (r *modelRunner) effectiveWait(cfg config.ModelConfig) time.Duration {
 }
 
 func (r *modelRunner) ensureModel(cfg config.ModelConfig) (spanFinder, error) {
+	if cfg.IsRemoteHTTP() {
+		endpoint := strings.TrimSpace(cfg.Endpoint)
+		if endpoint == "" {
+			return nil, fmt.Errorf("%w: model.endpoint is not configured", ErrModelUnavailable)
+		}
+		key := "http|" + endpoint + "|" + cfg.EffectiveFormat() + "|" + cfg.EffectiveLanguage()
+		r.mu.Lock()
+		if r.loaded != nil && r.loadedDir == key {
+			m := r.loaded
+			r.mu.Unlock()
+			return m, nil
+		}
+		finder := newHTTPNERFinder(cfg)
+		r.loaded = finder
+		r.loadedDir = key
+		r.lastErr = nil
+		r.fails = 0
+		r.retryAt = time.Time{}
+		r.mu.Unlock()
+		return finder, nil
+	}
 	dir := cfg.EffectiveDir()
 	r.mu.Lock()
 	if r.loaded != nil && r.loadedDir == dir {
@@ -482,13 +534,16 @@ func loadSafe(loader func(string) (spanFinder, error), dir string) (m spanFinder
 	return loader(dir)
 }
 
-func findSafe(m spanFinder, text string) (spans []guard.Span, err error) {
+func findSafe(ctx context.Context, m spanFinder, text string) (spans []guard.Span, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			spans = nil
 			err = fmt.Errorf("panic running guard model: %v", rec)
 		}
 	}()
+	if cf, ok := m.(contextSpanFinder); ok {
+		return cf.FindContext(ctx, text)
+	}
 	return m.Find(text), nil
 }
 
@@ -662,7 +717,7 @@ func (r *modelRunner) analyzePiece(ctx context.Context, m spanFinder, piece stri
 			<-r.turn
 			releaseInflight()
 		}()
-		spans, err := findSafe(m, piece)
+		spans, err := findSafe(ctx, m, piece)
 		if err == nil {
 			found := make([]redact.Found, 0, len(spans))
 			for _, s := range spans {

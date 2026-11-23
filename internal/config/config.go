@@ -33,6 +33,10 @@ const (
 	DefaultProtocol = ProtocolClaude
 
 	ModelAstrLinkGuard = "astrlink-guard"
+	ModelProviderLocal = "astrlink-guard"
+	ModelProviderHTTP  = "http"
+	ModelFormatGeneric = "generic"
+	ModelFormatPresidio = "presidio"
 	EnvModelDir        = "CPA_REDUCTANT_MODEL_DIR"
 	EnvKeyPath         = "CPA_REDUCTANT_KEY_PATH"
 
@@ -58,17 +62,52 @@ var supportedProtocols = []string{
 }
 
 type ModelConfig struct {
-	Enabled      bool    `yaml:"enabled"`
-	Name         string  `yaml:"name"`
-	Dir          string  `yaml:"dir"`
-	MinScore     float64 `yaml:"min_score"`
-	Strict       bool    `yaml:"strict"`
-	WaitMS       int     `yaml:"wait_ms"`
-	AutoDownload *bool   `yaml:"auto_download"`
-	Mirror       string  `yaml:"mirror"`
+	Enabled      bool              `yaml:"enabled"`
+	Provider     string            `yaml:"provider"`
+	Name         string            `yaml:"name"`
+	Dir          string            `yaml:"dir"`
+	Endpoint     string            `yaml:"endpoint"`
+	Format       string            `yaml:"format"`
+	Language     string            `yaml:"language"`
+	Headers      map[string]string `yaml:"headers"`
+	MinScore     float64           `yaml:"min_score"`
+	Strict       bool              `yaml:"strict"`
+	WaitMS       int               `yaml:"wait_ms"`
+	AutoDownload *bool             `yaml:"auto_download"`
+	Mirror       string            `yaml:"mirror"`
+}
+
+func (m ModelConfig) EffectiveProvider() string {
+	p := strings.ToLower(strings.TrimSpace(m.Provider))
+	if p == "" {
+		return ModelProviderLocal
+	}
+	return p
+}
+
+func (m ModelConfig) IsRemoteHTTP() bool {
+	return m.EffectiveProvider() == ModelProviderHTTP
+}
+
+func (m ModelConfig) EffectiveFormat() string {
+	f := strings.ToLower(strings.TrimSpace(m.Format))
+	if f == "" {
+		return ModelFormatGeneric
+	}
+	return f
+}
+
+func (m ModelConfig) EffectiveLanguage() string {
+	if l := strings.TrimSpace(m.Language); l != "" {
+		return l
+	}
+	return "en"
 }
 
 func (m ModelConfig) EffectiveAutoDownload() bool {
+	if m.IsRemoteHTTP() {
+		return false
+	}
 	if m.AutoDownload == nil {
 		return true
 	}
@@ -78,12 +117,21 @@ func (m ModelConfig) EffectiveAutoDownload() bool {
 func (m ModelConfig) EffectiveName() string {
 	name := strings.ToLower(strings.TrimSpace(m.Name))
 	if name == "" {
+		if m.IsRemoteHTTP() {
+			return "http-" + m.EffectiveFormat()
+		}
 		return ModelAstrLinkGuard
 	}
 	return name
 }
 
 func (m ModelConfig) EffectiveDir() string {
+	if m.IsRemoteHTTP() {
+		if dir := strings.TrimSpace(m.Dir); dir != "" {
+			return filepath.Clean(dir)
+		}
+		return ""
+	}
 	if dir := strings.TrimSpace(m.Dir); dir != "" {
 		return filepath.Clean(dir)
 	}
@@ -115,8 +163,29 @@ func (m ModelConfig) EffectiveWait() time.Duration {
 }
 
 func (m ModelConfig) Validate() error {
-	if name := m.EffectiveName(); name != ModelAstrLinkGuard {
-		return fmt.Errorf("unsupported model %q (only %q is supported)", m.Name, ModelAstrLinkGuard)
+	switch provider := m.EffectiveProvider(); provider {
+	case ModelProviderLocal:
+		if name := m.EffectiveName(); name != ModelAstrLinkGuard {
+			return fmt.Errorf("unsupported model %q (only %q is supported for local provider)", m.Name, ModelAstrLinkGuard)
+		}
+	case ModelProviderHTTP:
+		endpoint := strings.TrimSpace(m.Endpoint)
+		if m.Enabled && endpoint == "" {
+			return fmt.Errorf("model.endpoint is required when model.provider is %q and enabled", ModelProviderHTTP)
+		}
+		if endpoint != "" {
+			u, err := url.Parse(endpoint)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return fmt.Errorf("model.endpoint must be a valid http/https URL, got %q", m.Endpoint)
+			}
+		}
+		switch f := m.EffectiveFormat(); f {
+		case ModelFormatGeneric, ModelFormatPresidio:
+		default:
+			return fmt.Errorf("unsupported model.format %q (expected %q or %q)", m.Format, ModelFormatGeneric, ModelFormatPresidio)
+		}
+	default:
+		return fmt.Errorf("unsupported model.provider %q (expected %q or %q)", m.Provider, ModelProviderLocal, ModelProviderHTTP)
 	}
 	if m.MinScore != 0 && (m.MinScore < guard.Floor || m.MinScore >= 1) {
 		return fmt.Errorf("model.min_score must be in [%.1f, 1.0), got %g", guard.Floor, m.MinScore)
@@ -759,7 +828,7 @@ func Metadata() pluginapi.Metadata {
 			{Name: "scope_isolation", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Isolate placeholder restoration per CPA CallerScope to prevent cross-tenant placeholder oracle leaks (default: false)"},
 			{Name: "scope_ttl_seconds", Type: pluginapi.ConfigFieldTypeNumber, Description: "Retention TTL in seconds for per-CallerScope tracked placeholders when scope_isolation is enabled (default: 86400)"},
 			{Name: "alerts", Type: pluginapi.ConfigFieldTypeObject, Description: "Zero-plaintext async webhook alerts ({webhook_url, events: [block|warn|error], timeout_ms, headers})"},
-			{Name: "model", Type: pluginapi.ConfigFieldTypeObject, Description: "Local PII NER model (astrlink-guard): set enabled=true (auto-downloads by default unless auto_download=false); fields: enabled, auto_download, name, dir, min_score, strict, wait_ms, mirror"},
+			{Name: "model", Type: pluginapi.ConfigFieldTypeObject, Description: "PII NER model (local astrlink-guard or remote http/presidio): fields: enabled, provider (astrlink-guard|http), endpoint, format (generic|presidio), language, headers, auto_download, name, dir, min_score, strict, wait_ms, mirror"},
 			{Name: "policies", Type: pluginapi.ConfigFieldTypeArray, Description: "Per-model / per-protocol policy overrides matched in order ({name, models, exclude_models, protocols, secrets, personal, kinds, words, rules, actions, allow, shape, block_terms, model})"},
 		},
 	}
