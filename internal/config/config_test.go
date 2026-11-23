@@ -348,6 +348,10 @@ policies:
 		"policies:\n  - name: bad-score\n    model:\n      min_score: 0.2\n",
 		"policies:\n  - name: bad-wait\n    model:\n      wait_ms: -5\n",
 		"policies:\n  - name: bad-action\n    actions:\n      EMAIL: drop\n",
+		"alerts:\n  webhook_url: ftp://invalid.local/hook\n",
+		"alerts:\n  webhook_url: https://hooks.local/a\n  events: [mask]\n",
+		"alerts:\n  timeout_ms: -1\n",
+		"scope_ttl_seconds: -10\n",
 	} {
 		if _, err := Parse([]byte(bad)); err == nil {
 			t.Fatalf("expected validation error for %q", bad)

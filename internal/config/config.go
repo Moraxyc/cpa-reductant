@@ -39,6 +39,7 @@ const (
 	DefaultModelWaitMS       = 2000
 	DefaultModelStrictWaitMS = 15000
 	DefaultScopeTTLSeconds   = 86400
+	DefaultAlertTimeoutMS    = 5000
 )
 
 var Version = "dev"
@@ -211,24 +212,80 @@ func (p PolicyOverride) Matches(protocol, model string) bool {
 	return matchesAnyModelPattern(p.Models, model)
 }
 
+type AlertConfig struct {
+	WebhookURL string            `yaml:"webhook_url"`
+	Events     []string          `yaml:"events"`
+	TimeoutMS  int               `yaml:"timeout_ms"`
+	Headers    map[string]string `yaml:"headers"`
+}
+
+func (a AlertConfig) Enabled() bool {
+	return strings.TrimSpace(a.WebhookURL) != ""
+}
+
+func (a AlertConfig) EffectiveEvents() []string {
+	if len(a.Events) == 0 {
+		if a.Enabled() {
+			return []string{"block"}
+		}
+		return nil
+	}
+	out := make([]string, 0, len(a.Events))
+	for _, ev := range a.Events {
+		norm := strings.ToLower(strings.TrimSpace(ev))
+		if norm != "" && !slices.Contains(out, norm) {
+			out = append(out, norm)
+		}
+	}
+	return out
+}
+
+func (a AlertConfig) EffectiveTimeout() time.Duration {
+	if a.TimeoutMS > 0 {
+		return time.Duration(a.TimeoutMS) * time.Millisecond
+	}
+	return DefaultAlertTimeoutMS * time.Millisecond
+}
+
+func (a AlertConfig) Validate() error {
+	if a.TimeoutMS < 0 {
+		return fmt.Errorf("alerts.timeout_ms must be >= 0, got %d", a.TimeoutMS)
+	}
+	for _, ev := range a.Events {
+		switch strings.ToLower(strings.TrimSpace(ev)) {
+		case "block", "warn", "error":
+		default:
+			return fmt.Errorf("alerts.events: unsupported event %q (expected block, warn, or error)", ev)
+		}
+	}
+	if raw := strings.TrimSpace(a.WebhookURL); raw != "" {
+		u, err := url.Parse(raw)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("alerts.webhook_url must be a valid http/https URL, got %q", a.WebhookURL)
+		}
+	}
+	return nil
+}
+
 type Config struct {
-	Models        []string          `yaml:"models"`
-	ExcludeModels []string          `yaml:"exclude_models"`
-	Protocols     []string          `yaml:"protocols"`
-	Secrets       *bool             `yaml:"secrets"`
-	Personal      *bool             `yaml:"personal"`
-	Kinds         map[string]bool   `yaml:"kinds"`
-	Words         []string          `yaml:"words"`
-	WordsAnyCase  bool              `yaml:"words_any_case"`
-	WordsWhole    bool              `yaml:"words_whole"`
-	Rules         []RuleConfig      `yaml:"rules"`
-	Actions       map[string]string `yaml:"actions"`
-	Allow         []string          `yaml:"allow"`
-	Shape         bool              `yaml:"shape"`
-	BlockTerms    bool              `yaml:"block_terms"`
+	Models          []string          `yaml:"models"`
+	ExcludeModels   []string          `yaml:"exclude_models"`
+	Protocols       []string          `yaml:"protocols"`
+	Secrets         *bool             `yaml:"secrets"`
+	Personal        *bool             `yaml:"personal"`
+	Kinds           map[string]bool   `yaml:"kinds"`
+	Words           []string          `yaml:"words"`
+	WordsAnyCase    bool              `yaml:"words_any_case"`
+	WordsWhole      bool              `yaml:"words_whole"`
+	Rules           []RuleConfig      `yaml:"rules"`
+	Actions         map[string]string `yaml:"actions"`
+	Allow           []string          `yaml:"allow"`
+	Shape           bool              `yaml:"shape"`
+	BlockTerms      bool              `yaml:"block_terms"`
 	KeyPath         string            `yaml:"key_path"`
 	ScopeIsolation  bool              `yaml:"scope_isolation"`
 	ScopeTTLSeconds int               `yaml:"scope_ttl_seconds"`
+	Alerts          AlertConfig       `yaml:"alerts"`
 	Model           ModelConfig       `yaml:"model"`
 	Policies        []PolicyOverride  `yaml:"policies"`
 }
@@ -397,6 +454,9 @@ func (c *Config) EffectiveScopeTTL() time.Duration {
 func (c *Config) validate() error {
 	if c.ScopeTTLSeconds < 0 {
 		return fmt.Errorf("scope_ttl_seconds must be >= 0, got %d", c.ScopeTTLSeconds)
+	}
+	if err := c.Alerts.Validate(); err != nil {
+		return err
 	}
 	if err := c.Model.Validate(); err != nil {
 		return err
@@ -698,6 +758,7 @@ func Metadata() pluginapi.Metadata {
 			{Name: "key_path", Type: pluginapi.ConfigFieldTypeString, Description: "Path to persist the 32-byte placeholder HMAC key across restarts"},
 			{Name: "scope_isolation", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Isolate placeholder restoration per CPA CallerScope to prevent cross-tenant placeholder oracle leaks (default: false)"},
 			{Name: "scope_ttl_seconds", Type: pluginapi.ConfigFieldTypeNumber, Description: "Retention TTL in seconds for per-CallerScope tracked placeholders when scope_isolation is enabled (default: 86400)"},
+			{Name: "alerts", Type: pluginapi.ConfigFieldTypeObject, Description: "Zero-plaintext async webhook alerts ({webhook_url, events: [block|warn|error], timeout_ms, headers})"},
 			{Name: "model", Type: pluginapi.ConfigFieldTypeObject, Description: "Local PII NER model (astrlink-guard): set enabled=true (auto-downloads by default unless auto_download=false); fields: enabled, auto_download, name, dir, min_score, strict, wait_ms, mirror"},
 			{Name: "policies", Type: pluginapi.ConfigFieldTypeArray, Description: "Per-model / per-protocol policy overrides matched in order ({name, models, exclude_models, protocols, secrets, personal, kinds, words, rules, actions, allow, shape, block_terms, model})"},
 		},

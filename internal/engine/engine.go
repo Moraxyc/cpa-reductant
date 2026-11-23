@@ -76,6 +76,7 @@ type Status struct {
 	Stats              StatsSnapshot `json:"stats"`
 	Model              ModelStatus   `json:"model"`
 	Scope              ScopeStats    `json:"scope"`
+	Alerts             AlertStatus   `json:"alerts"`
 	RecentEvents       []FilterEvent `json:"recent_events,omitempty"`
 }
 
@@ -318,6 +319,7 @@ type Engine struct {
 	events    *eventRing
 	capture   *debugCapture
 	scopes    *scopeVault
+	alerts    *alertDispatcher
 	startedAt time.Time
 
 	metaMu             sync.Mutex
@@ -344,6 +346,7 @@ func New(cfg *config.Config) *Engine {
 		events:         newEventRing(defaultEventRing),
 		capture:        newDebugCapture(defaultCaptureCapacity),
 		scopes:         newScopeVault(defaultScopeMaxScopes, defaultScopeMaxEntries, cfg.EffectiveScopeTTL()),
+		alerts:         newAlertDispatcher(cfg.Alerts),
 		startedAt:      time.Now().UTC(),
 		keyPathInitial: keyPath,
 	}
@@ -363,6 +366,15 @@ func (e *Engine) SetLogger(fn Logger) {
 			e.model.setLogger(nil)
 		} else {
 			e.model.setLogger(func(level, msg string, fields map[string]any) {
+				fn(level, "", msg, fields)
+			})
+		}
+	}
+	if e.alerts != nil {
+		if fn == nil {
+			e.alerts.setLogger(nil)
+		} else {
+			e.alerts.setLogger(func(level, msg string, fields map[string]any) {
 				fn(level, "", msg, fields)
 			})
 		}
@@ -417,6 +429,9 @@ func (e *Engine) Update(cfg *config.Config) {
 	if e.scopes != nil {
 		e.scopes.SetTTL(cfg.EffectiveScopeTTL())
 	}
+	if e.alerts != nil {
+		e.alerts.Configure(cfg.Alerts)
+	}
 	if e.model != nil {
 		e.model.Configure(cfg.EffectiveModelRunnerConfig())
 	}
@@ -433,7 +448,13 @@ func (e *Engine) TriggerModelDownload(mirror string) (ModelStatus, error) {
 }
 
 func (e *Engine) Close() {
-	if e != nil && e.model != nil {
+	if e == nil {
+		return
+	}
+	if e.alerts != nil {
+		e.alerts.Close()
+	}
+	if e.model != nil {
 		e.model.Close()
 	}
 }
@@ -535,8 +556,16 @@ func (e *Engine) StatusWithOptions(eventLimit int, actionFilter string) Status {
 		Stats:        e.stats.snapshot(),
 		Model:        e.ModelStatus(),
 		Scope:        e.scopeStats(cfg.ScopeIsolation),
+		Alerts:       e.alertStatus(),
 		RecentEvents: recent,
 	}
+}
+
+func (e *Engine) alertStatus() AlertStatus {
+	if e == nil || e.alerts == nil {
+		return AlertStatus{}
+	}
+	return e.alerts.Status()
 }
 
 func (e *Engine) scopeStats(enabled bool) ScopeStats {
@@ -665,7 +694,7 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 			err = fmt.Errorf("redaction panic: %v", rec)
 			e.stats.recordMaskError(meta.Protocol, meta.Model, len(body), dur)
 			e.touchActivity()
-			e.events.push(FilterEvent{
+			ev := e.events.push(FilterEvent{
 				Phase:      "request",
 				Protocol:   meta.Protocol,
 				Model:      meta.Model,
@@ -674,6 +703,7 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 				Bytes:      len(body),
 				Error:      err.Error(),
 			})
+			e.alerts.Notify(ev)
 			if captureID != 0 && e.capture != nil {
 				rawStr, rawBytes, rawTrunc := truncateCaptureBytes(body, maxCaptureBodyBytes)
 				e.capture.recordRequest(DebugCaptureEntry{
@@ -703,7 +733,7 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 	if modelErr != nil {
 		e.stats.recordMaskError(meta.Protocol, meta.Model, len(body), dur)
 		e.touchActivity()
-		e.events.push(FilterEvent{
+		ev := e.events.push(FilterEvent{
 			Phase:      "request",
 			Protocol:   meta.Protocol,
 			Model:      meta.Model,
@@ -712,6 +742,7 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 			Bytes:      len(body),
 			Error:      modelErr.Error(),
 		})
+		e.alerts.Notify(ev)
 		if captureID != 0 && e.capture != nil {
 			rawStr, rawBytes, rawTrunc := truncateCaptureBytes(body, maxCaptureBodyBytes)
 			e.capture.recordRequest(DebugCaptureEntry{
@@ -775,7 +806,7 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 		action = "warn"
 	}
 
-	e.events.push(FilterEvent{
+	ev := e.events.push(FilterEvent{
 		Phase:      "request",
 		Protocol:   meta.Protocol,
 		Model:      meta.Model,
@@ -784,6 +815,7 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 		Bytes:      len(body),
 		Hits:       toEventHits(hits),
 	})
+	e.alerts.Notify(ev)
 
 	if captureID != 0 && e.capture != nil {
 		rawStr, rawBytes, rawTrunc := truncateCaptureBytes(body, maxCaptureBodyBytes)

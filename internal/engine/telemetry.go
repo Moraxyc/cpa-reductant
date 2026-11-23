@@ -182,7 +182,7 @@ func newEventRing(capacity int) *eventRing {
 	}
 }
 
-func (r *eventRing) push(ev FilterEvent) {
+func (r *eventRing) push(ev FilterEvent) FilterEvent {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.seq++
@@ -196,6 +196,7 @@ func (r *eventRing) push(ev FilterEvent) {
 	if r.next == 0 {
 		r.full = true
 	}
+	return ev
 }
 
 func (r *eventRing) recent(limit int, actionFilter string) []FilterEvent {
