@@ -15,7 +15,8 @@ plugins:
       enabled: true
 
       # 1. 作用范围控制
-      models: []                    # 目标上游 LLM 模型 ID；省略或 [] 表示保护所有已配置模型（注意与下方 model 区分）
+      models: []                    # 目标上游 LLM 模型 ID 或通配符（支持 *、?）；省略或 [] 表示保护所有已配置模型（注意与下方 model 区分）
+      exclude_models: []            # 需要跳过的模型 ID 或通配符（优先级高于 models，例如 ["ollama/*"]）
       protocols: []                 # 限定生效的 CPA 协议格式；省略或 [] 表示全部支持格式
 
       # 2. 内建规则开关
@@ -44,10 +45,21 @@ plugins:
       block_terms: false            # true 时拒绝命中 words 自定义词的请求（等价 actions.TERM=block）
       shape: false                  # true 时使用保形伪造值替代 {{...}} 占位符
       # key_path: /var/lib/cpa/reductant.key # 可选（或环境变量 CPA_REDUCTANT_KEY_PATH）：持久化占位符 HMAC 密钥
+      scope_isolation: false        # 按 CPA CallerScope 隔离占位符还原，防止多租户跨租户还原越权
+      # scope_ttl_seconds: 86400    # 开启 scope_isolation 时单租户占位符追踪保留时间（秒，默认 86400）
 
-      # 5. 本地 PII 语义识别模型（默认关闭，见 local-model.md）
+      # 5. 零明文异步 Webhook 告警（可选）
+      # alerts:
+      #   webhook_url: https://hooks.example.internal/cpa-alerts
+      #   events: [block, warn]     # 支持 block、warn、error（默认 [block]）
+      #   timeout_ms: 5000
+      #   headers:
+      #     Authorization: "Bearer <token>"
+
+      # 6. PII 语义识别模型（默认关闭，支持本地 astrlink-guard 或远程 http/presidio，见 local-model.md）
       model:
         enabled: false
+        provider: astrlink-guard    # astrlink-guard（本地）| http（远程 generic / presidio）
         auto_download: true
         name: astrlink-guard
         # dir: /path/to/astrlink-guard
@@ -55,15 +67,39 @@ plugins:
         strict: false
         # wait_ms: 2000
         # mirror: https://hf-mirror.com
+
+      # 7. 按模型 / 协议分级的策略覆写（按声明顺序依次匹配合并）
+      # policies:
+      #   - name: strict-external-claude
+      #     models: ["claude-*"]
+      #     exclude_models: ["claude-haiku-*"]
+      #     protocols: [claude]
+      #     block_terms: true
+      #     model:
+      #       enabled: true
+      #       min_score: 0.75
 ```
 
 ## 配置要点说明
 
 ### 作用范围：`models`（复数）vs `model`（单数）
 
-- **`models`**：决定哪些**上游大模型请求**需要经过脱敏。省略或设为 `[]` 表示保护所有已配置模型。
-- **`model`**：控制是否启用内嵌的**本地 PII 语义识别模型**（`astrlink-guard`），详情见 [本地 PII 模型指南](local-model.md)。
+- **`models`**：决定哪些**上游大模型请求**需要经过脱敏，支持通配符（`*` 匹配含 `/` 在内的任意字符序列，`?` 匹配单个字符）。省略或设为 `[]` 表示保护所有已配置模型。
+- **`exclude_models`**：需要跳过脱敏的模型 ID 或通配符（如 `ollama/*`、`local-*`），优先级高于 `models`。
+- **`model`**：配置 **PII 语义识别模型**（本地内嵌 `astrlink-guard` 或远程 `http` NER 后端），详情见 [PII 语义模型指南](local-model.md)。
 - **`protocols`**：限定生效的 CPA 协议格式，省略或 `[]` 表示覆盖全部已支持格式。兼容别名包括：`anthropic` → `claude`、`chat-completions` / `openai-chat-completions` → `openai`、`responses` / `openai-responses` → `openai-response`。
+
+### 按模型 / 协议分级策略（`policies`）
+
+- **`policies`**：可针对满足 `models`、`exclude_models`、`protocols` 条件的子集流量覆写策略，多条命中按声明顺序叠加：
+  - 标量开关（`secrets`、`personal`、`words_any_case`、`words_whole`、`shape`、`block_terms`）与 `model`（`enabled`、`min_score`、`strict`、`wait_ms`）非空时覆写基础配置。
+  - `kinds` 与 `actions` 按键合并（显式将某类动作设为 `mask` 可覆盖基础配置中的 `warn` / `block`）。
+  - `words`、`rules`、`allow` 追加到基础列表之后。
+
+### 多租户隔离与 Webhook 告警（`scope_isolation`、`alerts`）
+
+- **`scope_isolation`**（默认 `false`）：按 CPA 传入的 `CallerScope` 在有界 LRU/TTL 表（`scope_ttl_seconds` 默认 `86400` 秒）中追踪各租户脱敏产生的占位符，阻止响应或 SSE 流还原其他租户的占位符。
+- **`alerts`**：触发 `events`（`block` / `warn` / `error`）时，通过有界非阻塞队列向 `alerts.webhook_url` 异步推送零明文 `FilterEvent` JSON，不会阻塞请求主链路。
 
 ### 内建规则类别（`secrets`、`personal`、`kinds`）
 
@@ -102,6 +138,6 @@ plugins:
 
 ### 当前限制
 
-- 本地 PII 模型当前仅支持 `astrlink-guard`（CPU / macOS CoreML），暂未接入依赖独立 `pf-serve` 进程的 `privacy-filter` 与 Linux Vulkan/GPU 加速。
+- 进程内本地推理支持 `astrlink-guard`（CPU / macOS CoreML）；如需 GPU 或独立推理服务，可配置 `model.provider: http` 接入外部通用或 Presidio 兼容 NER 服务。
 - 暂不支持 CPA Home 模式与 `/v1/alpha/search`（CPA 原生限制）。
-- 占位符还原映射在进程内共享，暂未按多租户隔离；插件未加载或路由失败时，CPA 会回退原生路由直出。
+- 未开启 `scope_isolation` 时，占位符还原映射在进程内共享；插件未加载或路由失败时，CPA 会回退原生路由直出。

@@ -66,3 +66,23 @@ model:
 - **`wait_ms`**: per-request inference wait cap in milliseconds (defaults: `2000` when non-strict, `15000` when strict).
 - **`mirror`**: custom download mirror URL (when omitted, failed `huggingface.co` downloads fall back to `hf-mirror.com`).
 - **Execution & caching**: runs in-process on CPU / macOS CoreML with 4 KB stable chunking, an in-memory LRU cache, and a disk feature cache (`<dir>/found-<rev>.bin` stores hashes and offsets only; no plaintext is ever written to disk).
+
+## 5. Remote HTTP NER Backend (`provider: http`)
+
+To offload semantic PII detection to a dedicated GPU or external NER service (such as Microsoft Presidio or a custom GLiNER service), set `model.provider: http`. It reuses the same 4 KB chunking, in-memory LRU caching, in-flight deduplication, `wait_ms` budget, and `strict` fallback logic:
+
+```yaml
+model:
+  enabled: true
+  provider: http
+  format: presidio              # generic (default) | presidio
+  endpoint: http://127.0.0.1:5001/analyze
+  language: en                  # Sent to Presidio analyzer (default: en)
+  min_score: 0.8
+  wait_ms: 2000
+  headers:
+    Authorization: "Bearer <optional-token>"
+```
+
+- **`generic` format**: `POST` `{"text": "..."}` expecting `{"spans": [{"start": 0, "end": 4, "label": "private_person", "score": 0.95}]}` (UTF-8 byte offsets; top-level JSON arrays and `results` are also accepted).
+- **`presidio` format**: `POST` `{"text": "...", "language": "...", "score_threshold": 0.8}` expecting Presidio's JSON array `[{"start": 0, "end": 4, "entity_type": "PERSON", "score": 0.95}]` (character/rune offsets are automatically converted to UTF-8 byte offsets).

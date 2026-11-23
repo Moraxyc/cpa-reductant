@@ -15,7 +15,8 @@ plugins:
       enabled: true
 
       # 1. Scope control
-      models: []                    # Target upstream LLM model IDs; omit or [] to protect all configured models (distinct from `model` below)
+      models: []                    # Target upstream LLM model IDs or globs (*, ?); omit or [] to protect all models (distinct from `model` below)
+      exclude_models: []            # Model IDs or globs (*, ?) to skip even when matched by `models` (e.g. ["ollama/*"])
       protocols: []                 # Restrict active CPA protocol formats; omit or [] for all supported protocols
 
       # 2. Built-in rule toggles
@@ -44,10 +45,21 @@ plugins:
       block_terms: false            # Reject requests matching `words` when true (equivalent to actions.TERM=block)
       shape: false                  # Use shape-preserving synthetic values instead of {{...}} placeholders when true
       # key_path: /var/lib/cpa/reductant.key # Optional (or env CPA_REDUCTANT_KEY_PATH): persist placeholder HMAC key
+      scope_isolation: false        # Isolate placeholder restoration per CPA CallerScope to block cross-tenant placeholder leaks
+      # scope_ttl_seconds: 86400    # Retention TTL (seconds) for per-CallerScope tracked placeholders (default 86400)
 
-      # 5. Local PII semantic model (disabled by default; see local-model.md)
+      # 5. Async zero-plaintext webhook alerts (optional)
+      # alerts:
+      #   webhook_url: https://hooks.example.internal/cpa-alerts
+      #   events: [block, warn]     # Supported: block, warn, error (default: [block])
+      #   timeout_ms: 5000
+      #   headers:
+      #     Authorization: "Bearer <token>"
+
+      # 6. Semantic PII model (disabled by default; local astrlink-guard or remote http/presidio; see local-model.md)
       model:
         enabled: false
+        provider: astrlink-guard    # astrlink-guard (local) | http (remote generic/presidio)
         auto_download: true
         name: astrlink-guard
         # dir: /path/to/astrlink-guard
@@ -55,15 +67,39 @@ plugins:
         strict: false
         # wait_ms: 2000
         # mirror: https://hf-mirror.com
+
+      # 7. Per-model / per-protocol policy overrides (matched & merged in declaration order)
+      # policies:
+      #   - name: strict-external-claude
+      #     models: ["claude-*"]
+      #     exclude_models: ["claude-haiku-*"]
+      #     protocols: [claude]
+      #     block_terms: true
+      #     model:
+      #       enabled: true
+      #       min_score: 0.75
 ```
 
 ## Key Configuration Details
 
 ### Scope: `models` (plural) vs `model` (singular)
 
-- **`models`** selects which **upstream LLM requests** pass through redaction. Leaving it empty or omitted protects all configured models.
-- **`model`** configures the embedded **local PII semantic recognition model** (`astrlink-guard`). See the [Local PII Model Guide](local-model.md) for details.
+- **`models`** selects which **upstream LLM requests** pass through redaction. Supports wildcard globs (`*` matches any sequence including `/`, `?` matches any single character). Leaving it empty or omitted protects all configured models.
+- **`exclude_models`** skips matching model IDs or glob patterns (e.g. `ollama/*`, `local-*`) even when matched by `models` or when `models` is empty.
+- **`model`** configures the **semantic PII model** (embedded `astrlink-guard` or remote `http` NER backend). See the [PII Model Guide](local-model.md) for details.
 - **`protocols`** restricts which CPA protocol formats are intercepted. Leaving it empty or omitted covers all supported protocols. Accepted aliases include `anthropic` → `claude`, `chat-completions` / `openai-chat-completions` → `openai`, and `responses` / `openai-responses` → `openai-response`.
+
+### Per-Model / Per-Protocol Overrides (`policies`)
+
+- **`policies`** lets you override redaction settings for subsets of traffic matched by `models`, `exclude_models`, and `protocols`. All matching entries are applied in declaration order:
+  - Scalar switches (`secrets`, `personal`, `words_any_case`, `words_whole`, `shape`, `block_terms`) and `model` (`enabled`, `min_score`, `strict`, `wait_ms`) override the base config when specified.
+  - `kinds` and `actions` merge by key (setting an action to `mask` downgrades a base `warn` or `block` override).
+  - `words`, `rules`, and `allow` append to the base lists.
+
+### Multi-Tenant Isolation & Webhook Alerts (`scope_isolation`, `alerts`)
+
+- **`scope_isolation`** (default `false`): tracks emitted placeholders per CPA `CallerScope` in a bounded LRU/TTL vault (`scope_ttl_seconds`, default `86400`) and prevents one tenant's response or SSE stream from restoring placeholders created by another tenant.
+- **`alerts`**: posts zero-plaintext sanitized `FilterEvent` JSON payloads asynchronously to `alerts.webhook_url` when matching `events` (`block`, `warn`, `error`) occur. Uses a bounded non-blocking queue so slow webhooks never stall requests.
 
 ### Built-in Categories (`secrets`, `personal`, `kinds`)
 
@@ -102,6 +138,6 @@ plugins:
 
 ### Current Limitations
 
-- Local PII inference currently supports `astrlink-guard` (CPU / macOS CoreML) only; `privacy-filter` (requiring a separate `pf-serve` process) and Linux Vulkan/GPU acceleration are not integrated yet.
+- In-process local PII inference supports `astrlink-guard` (CPU / macOS CoreML); for GPU/offloaded inference, configure `model.provider: http` against an external generic or Presidio-compatible NER service.
 - CPA Home mode and `/v1/alpha/search` are not supported (native CPA limitation).
-- Restoration mappings are shared in-process without multi-tenant isolation; if the plugin is unloaded or routing fails, CPA falls back to native passthrough routing.
+- When `scope_isolation` is disabled (default), restoration mappings are shared in-process; if the plugin is unloaded or routing fails, CPA falls back to native passthrough routing.

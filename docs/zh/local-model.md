@@ -66,3 +66,23 @@ model:
 - **`wait_ms`**：单次请求等待模型推理的上限毫秒数（默认：非严格模式 `2000`，严格模式 `15000`）。
 - **`mirror`**：自定义下载镜像地址（留空时 `huggingface.co` 失败自动回退 `hf-mirror.com`）。
 - **运行方式与缓存**：纯进程内 CPU / macOS CoreML 推理，随插件进程直接运行；支持 4 KB 稳定分块与进程内 LRU / 磁盘特征缓存（`<dir>/found-<rev>.bin` 仅保存哈希与偏移量，只存特征索引、不落盘原文）。
+
+## 5. 远程 HTTP NER 后端（`provider: http`）
+
+如需将语义 PII 识别卸载到独立 GPU 服务或外部 NER 引擎（如 Microsoft Presidio 或自建 GLiNER 服务），可将 `model.provider` 设为 `http`。远程模式自动复用相同的 4 KB 分块、内存 LRU 缓存、并发去重、`wait_ms` 超时控制与 `strict` 降级机制：
+
+```yaml
+model:
+  enabled: true
+  provider: http
+  format: presidio              # generic（默认）| presidio
+  endpoint: http://127.0.0.1:5001/analyze
+  language: en                  # 传给 Presidio analyzer 的语言参数（默认 en）
+  min_score: 0.8
+  wait_ms: 2000
+  headers:
+    Authorization: "Bearer <optional-token>"
+```
+
+- **`generic` 格式**：`POST` `{"text": "..."}`，期望返回 `{"spans": [{"start": 0, "end": 4, "label": "private_person", "score": 0.95}]}`（UTF-8 字节偏移，也兼容顶层 JSON 数组或 `results` 字段）。
+- **`presidio` 格式**：`POST` `{"text": "...", "language": "...", "score_threshold": 0.8}`，期望返回 Presidio JSON 数组 `[{"start": 0, "end": 4, "entity_type": "PERSON", "score": 0.95}]`（插件会自动将字符/rune 偏移转换为 UTF-8 字节偏移）。
