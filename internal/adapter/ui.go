@@ -41,6 +41,7 @@ type uiViewData struct {
 	Status          engine.Status
 	BaseURL         string
 	JSONURL         string
+	MetricsURL      string
 	PreviewURL      string
 	DebugCaptureURL string
 	ActionFilter    string
@@ -173,6 +174,7 @@ func renderDashboardHTML(st engine.Status, baseURL, actionFilter string, eventLi
 		Status:          st,
 		BaseURL:         buildDashboardLink(baseURL, actionFilter, refreshSec, explicitLang),
 		JSONURL:         managementBasePath + managementStatusPath + "?format=json",
+		MetricsURL:      managementBasePath + managementMetricsPath,
 		PreviewURL:      managementBasePath + managementPreviewPath,
 		DebugCaptureURL: managementBasePath + managementDebugCapturePath,
 		ActionFilter:    actionFilter,

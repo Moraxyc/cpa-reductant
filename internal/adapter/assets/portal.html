@@ -49,6 +49,7 @@ body.embedded .auth-wrap{margin-top:12px}
         <button id="auto-refresh-btn" class="btn" type="button" onclick="toggleAutoRefresh()"></button>
         <button class="btn" type="button" onclick="loadStatus()" data-i18n="header.refresh"></button>
         <button class="btn" type="button" onclick="openJSON()">JSON</button>
+        <button class="btn" type="button" onclick="openMetrics()">Metrics</button>
         <button class="btn" type="button" onclick="disconnectKey()" data-i18n="auth.sign_out"></button>
         <select class="select lang-select" data-i18n-title="lang.label" data-i18n-aria="lang.label"></select>
       </div>
@@ -209,6 +210,7 @@ body.embedded .auth-wrap{margin-top:12px}
   }
   var KEY_STORAGE = 'cpa_reductant_mgmt_key';
   var STATUS_URL = '/v0/management/cpa-reductant/status';
+  var METRICS_URL = '/v0/management/cpa-reductant/metrics';
   var PREVIEW_URL = '/v0/management/cpa-reductant/preview';
   var DEBUG_CAPTURE_URL = '/v0/management/cpa-reductant/debug/capture';
   var MODEL_DOWNLOAD_URL = '/v0/management/cpa-reductant/model/download';
@@ -815,6 +817,19 @@ body.embedded .auth-wrap{margin-top:12px}
     setTimeout(function(){ URL.revokeObjectURL(url); }, 30000);
   };
 
+  window.openMetrics = async function(){
+    if(!state.key) return;
+    try{
+      var resp = await fetch(METRICS_URL, {headers: {'Authorization': 'Bearer ' + state.key}});
+      if(!resp.ok) return;
+      var text = await resp.text();
+      var blob = new Blob([text], {type: 'text/plain; charset=utf-8'});
+      var url = URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener');
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 30000);
+    }catch(_){}
+  };
+
   window.disconnectKey = function(){
     document.getElementById('secret-input').value = '';
     showAuth();
@@ -825,9 +840,81 @@ body.embedded .auth-wrap{margin-top:12px}
     try{ return JSON.stringify(JSON.parse(s), null, 2); }catch(_){ return s; }
   }
 
-  function capturePane(key, bytes, truncated, body){
+  function highlightTokens(text, tokens, cls){
+    if(!text) return '';
+    var uniq = [];
+    var seen = {};
+    (tokens || []).forEach(function(tok){
+      if(tok && !seen[tok]){ seen[tok] = true; uniq.push(tok); }
+    });
+    if(!uniq.length) return esc(text);
+    uniq.sort(function(a, b){ return b.length - a.length; });
+    var ranges = [];
+    uniq.forEach(function(tok){
+      var pos = 0;
+      while(pos < text.length){
+        var idx = text.indexOf(tok, pos);
+        if(idx < 0) break;
+        ranges.push([idx, idx + tok.length]);
+        pos = idx + tok.length;
+      }
+    });
+    if(!ranges.length) return esc(text);
+    ranges.sort(function(a, b){ return a[0] - b[0] || b[1] - a[1]; });
+    var out = '';
+    var cursor = 0;
+    for(var i = 0; i < ranges.length; i++){
+      var s = ranges[i][0], e = ranges[i][1];
+      if(s < cursor) continue;
+      if(s > cursor) out += esc(text.slice(cursor, s));
+      out += '<mark class="' + cls + '">' + esc(text.slice(s, e)) + '</mark>';
+      cursor = e;
+    }
+    if(cursor < text.length) out += esc(text.slice(cursor));
+    return out;
+  }
+
+  function capturePane(key, bytes, truncated, body, tokens, hlClass){
+    var rendered = (tokens && tokens.length && hlClass) ? highlightTokens(body, tokens, hlClass) : esc(body);
     return '<div class="diff-pane"><div class="diff-title"><span>' + textHTML(key) + '</span><span class="mono">' +
-      fmtBytes(bytes) + (truncated ? ' · ' + textHTML('capture.truncated') : '') + '</span></div><pre class="code-box">' + esc(body) + '</pre></div>';
+      fmtBytes(bytes) + (truncated ? ' · ' + textHTML('capture.truncated') : '') + '</span></div><pre class="code-box">' + rendered + '</pre></div>';
+  }
+
+  function exportCaptureEntry(id){
+    var entries = (state.lastCapture && state.lastCapture.entries) || [];
+    var target = null;
+    for(var i = 0; i < entries.length; i++){
+      if(String(entries[i].id) === String(id)){ target = entries[i]; break; }
+    }
+    if(!target) return;
+    var blob = new Blob([JSON.stringify(target, null, 2)], {type: 'application/json'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'cpa-reductant-capture-' + target.id + '.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 10000);
+  }
+
+  function copyAllowSnippet(btn, val){
+    var snippet = 'allow:\n  - ' + JSON.stringify(val);
+    var done = function(){
+      var origLabel = btn.textContent;
+      btn.textContent = t('capture.copied');
+      setTimeout(function(){ btn.textContent = origLabel; }, 1500);
+    };
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(snippet).then(done).catch(function(){});
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = snippet;
+      document.body.appendChild(ta);
+      ta.select();
+      try{ document.execCommand('copy'); done(); }catch(_){}
+      ta.remove();
+    }
   }
 
   function renderCapture(snap){
@@ -856,10 +943,15 @@ body.embedded .auth-wrap{margin-top:12px}
       var openAttr = state.openCaptures[ev.id] ? ' open' : '';
       var reps = ev.replacements || [];
       var restored = ev.restored_items || [];
-      var repHtml = reps.length ? (tableHead(['capture.original', 'capture.replacement', 'capture.kind', 'capture.finder', 'capture.action']) +
-        reps.map(function(r){
+      var repOrigTokens = reps.map(function(r){ return r.original; }).filter(Boolean);
+      var repPhTokens = reps.map(function(r){ return r.placeholder; }).filter(Boolean);
+      var resPhTokens = restored.map(function(r){ return r.placeholder; }).filter(Boolean);
+      var resOrigTokens = restored.map(function(r){ return r.original; }).filter(Boolean);
+      var repHtml = reps.length ? (tableHead(['capture.original', 'capture.replacement', 'capture.kind', 'capture.finder', 'capture.action', 'capture.helper']) +
+        reps.map(function(r, idx){
           var orig = r.original ? '<span class="orig-val">' + esc(r.original) + '</span>' : '<span class="sub">' + textHTML('capture.warn_only') + '</span>';
-          return '<tr><td class="mono">' + orig + '</td><td class="mono ph-val">' + esc(r.placeholder || '-') + '</td><td class="mono">' + esc(r.kind) + '</td><td class="mono">' + esc(r.by || '-') + '</td><td class="mono">' + esc(actionLabel(r.action || 'mask')) + '</td></tr>';
+          var helper = r.original ? '<button class="btn btn-xs cap-allow-btn" type="button" data-cap-id="' + ev.id + '" data-rep-idx="' + idx + '">' + textHTML('capture.copy_allow') + '</button>' : '<span class="sub">-</span>';
+          return '<tr><td class="mono">' + orig + '</td><td class="mono ph-val">' + esc(r.placeholder || '-') + '</td><td class="mono">' + esc(r.kind) + '</td><td class="mono">' + esc(r.by || '-') + '</td><td class="mono">' + esc(actionLabel(r.action || 'mask')) + '</td><td>' + helper + '</td></tr>';
         }).join('') + '</tbody></table>') : '<div class="sub">' + textHTML('capture.no_replacements') + '</div>';
       var resHtml = restored.length ? (tableHead(['capture.placeholder', 'capture.restored_text', 'capture.occurrences']) +
         restored.map(function(r){
@@ -878,20 +970,36 @@ body.embedded .auth-wrap{margin-top:12px}
         '</summary>' +
         '<div class="cap-body">' +
           (ev.error ? '<div class="err-box">' + esc(ev.error) + '</div>' : '') +
-          '<div><div class="diff-title"><span>' + textHTML('capture.request_details', {count: reps.length}) + '</span></div>' + repHtml + '</div>' +
+          '<div><div class="diff-title"><span>' + textHTML('capture.request_details', {count: reps.length}) + '</span><button class="btn btn-xs cap-export-btn" type="button" data-cap-id="' + ev.id + '">' + textHTML('capture.export_json') + '</button></div>' + repHtml + '</div>' +
           (resHtml ? '<div><div class="diff-title"><span>' + textHTML('capture.response_details', {count: ev.restored_count || 0}) + '</span></div>' + resHtml + '</div>' : '') +
           '<div class="diff-grid">' +
-            capturePane('capture.raw_request', ev.raw_request_bytes, ev.raw_request_truncated, prettyText(ev.raw_request)) +
-            capturePane('capture.masked_request', ev.masked_request_bytes, ev.masked_request_truncated, prettyText(ev.masked_request)) +
+            capturePane('capture.raw_request', ev.raw_request_bytes, ev.raw_request_truncated, prettyText(ev.raw_request), repOrigTokens, 'hl-orig') +
+            capturePane('capture.masked_request', ev.masked_request_bytes, ev.masked_request_truncated, prettyText(ev.masked_request), repPhTokens, 'hl-ph') +
           '</div>' +
           '<div class="diff-grid">' +
-            capturePane('capture.upstream_response', ev.upstream_response_bytes, ev.upstream_response_truncated, upText) +
-            capturePane('capture.restored_response', ev.restored_response_bytes, ev.restored_response_truncated, reText) +
+            capturePane('capture.upstream_response', ev.upstream_response_bytes, ev.upstream_response_truncated, upText, ev.response_binary ? null : resPhTokens, 'hl-ph') +
+            capturePane('capture.restored_response', ev.restored_response_bytes, ev.restored_response_truncated, reText, ev.response_binary ? null : resOrigTokens, 'hl-restored') +
           '</div>' +
         '</div></details>';
     }).join('');
     Array.prototype.forEach.call(list.querySelectorAll('details[data-cap-id]'), function(el){
       el.ontoggle = function(){ state.openCaptures[el.getAttribute('data-cap-id')] = el.open; };
+    });
+    Array.prototype.forEach.call(list.querySelectorAll('.cap-export-btn'), function(b){
+      b.onclick = function(){ exportCaptureEntry(b.getAttribute('data-cap-id')); };
+    });
+    Array.prototype.forEach.call(list.querySelectorAll('.cap-allow-btn'), function(b){
+      b.onclick = function(){
+        var capId = b.getAttribute('data-cap-id');
+        var idx = parseInt(b.getAttribute('data-rep-idx'), 10);
+        for(var i = 0; i < entries.length; i++){
+          if(String(entries[i].id) === String(capId)){
+            var rep = (entries[i].replacements || [])[idx];
+            if(rep && rep.original) copyAllowSnippet(b, rep.original);
+            break;
+          }
+        }
+      };
     });
   }
 

@@ -77,6 +77,10 @@ textarea{width:100%;min-height:76px;padding:10px;border-radius:8px;border:1px so
 .code-box{margin:0;padding:10px;border-radius:8px;background:var(--bg);border:1px solid var(--border);font:12px/1.45 var(--mono);white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto}
 .orig-val{color:var(--red);font-weight:600;word-break:break-all}
 .ph-val{color:var(--blue);word-break:break-all}
+.hl-orig{background:var(--red-bg);color:var(--red);border-radius:3px;padding:0 2px;font-weight:600}
+.hl-ph{background:var(--blue-bg);color:var(--blue);border-radius:3px;padding:0 2px;font-weight:600}
+.hl-restored{background:var(--green-bg);color:var(--green);border-radius:3px;padding:0 2px;font-weight:600}
+.btn-xs{padding:2px 6px;font-size:11px;border-radius:4px}
 .warn-box{margin-top:8px;padding:8px 10px;border-radius:6px;background:var(--amber-bg);color:var(--amber);font-size:12px}
 .kv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;margin-top:10px}
 .kv-item{padding:8px 10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12px}
