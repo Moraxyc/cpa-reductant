@@ -396,3 +396,50 @@ func TestEngineDebugCaptureLifecycleAndTTL(t *testing.T) {
 		t.Fatalf("expected CaptureBuffer to preserve head+tail, suffix=%q", string(cbBytes[len(cbBytes)-64:]))
 	}
 }
+
+func TestEnginePerRoutePolicyOverrides(t *testing.T) {
+	cfg, err := config.Parse([]byte(`
+words: [SYNTHETIC-POLICY-TERM]
+policies:
+  - name: strict-claude
+    models: ["claude-*"]
+    block_terms: true
+  - name: warn-email-openai
+    protocols: [openai]
+    actions:
+      EMAIL: warn
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	eng := New(cfg)
+	defer eng.Close()
+
+	// claude-* should block on SYNTHETIC-POLICY-TERM.
+	if _, err := eng.MaskRequest(context.Background(), RequestMeta{
+		Protocol: config.ProtocolClaude,
+		Model:    "claude-sonnet-4",
+	}, []byte(`{"text":"SYNTHETIC-POLICY-TERM"}`)); !errors.Is(err, ErrBlocked) {
+		t.Fatalf("expected ErrBlocked for claude-sonnet-4, got %v", err)
+	}
+
+	// openai gpt-5 should mask SYNTHETIC-POLICY-TERM and only warn on email.
+	masked, err := eng.MaskRequest(context.Background(), RequestMeta{
+		Protocol: config.ProtocolOpenAI,
+		Model:    "gpt-5",
+	}, []byte(`{"text":"SYNTHETIC-POLICY-TERM alice@example.com"}`))
+	if err != nil {
+		t.Fatalf("expected gpt-5 to succeed, got %v", err)
+	}
+	if strings.Contains(string(masked), "SYNTHETIC-POLICY-TERM") {
+		t.Fatalf("expected term to be masked on gpt-5: %s", masked)
+	}
+	if !strings.Contains(string(masked), "alice@example.com") {
+		t.Fatalf("expected email to pass through with warn on openai: %s", masked)
+	}
+
+	st := eng.Status()
+	if st.Policy.PoliciesCount != 2 {
+		t.Fatalf("expected PoliciesCount=2, got %d", st.Policy.PoliciesCount)
+	}
+}

@@ -268,3 +268,89 @@ block_terms: true
 		}
 	}
 }
+
+func TestPerRoutePolicyOverrides(t *testing.T) {
+	cfg, err := Parse([]byte(`
+secrets: true
+personal: true
+words: [BASE_SECRET]
+actions:
+  EMAIL: block
+model:
+  enabled: false
+  min_score: 0.8
+policies:
+  - name: external-claude
+    models: ["claude-*"]
+    exclude_models: ["claude-haiku-*"]
+    protocols: [anthropic]
+    words: [CLAUDE_ONLY_TERM]
+    actions:
+      EMAIL: warn
+      TERM: block
+    shape: true
+    model:
+      enabled: true
+      min_score: 0.65
+      strict: true
+      wait_ms: 5000
+  - name: downgrade-email
+    models: ["claude-sonnet-*"]
+    actions:
+      EMAIL: mask
+`))
+	if err != nil {
+		t.Fatalf("parse policies: %v", err)
+	}
+
+	// Runner config should become enabled because external-claude enables model.
+	if !cfg.EffectiveModelRunnerConfig().Enabled {
+		t.Fatal("expected EffectiveModelRunnerConfig().Enabled to be true")
+	}
+
+	// Unmatched model gets base config directly.
+	baseResolved := cfg.ResolvePolicy(ProtocolOpenAI, "gpt-5")
+	if baseResolved != cfg {
+		t.Fatal("expected unmatched route to return base config pointer")
+	}
+
+	// Excluded model inside policy does not match external-claude.
+	haikuResolved := cfg.ResolvePolicy(ProtocolClaude, "claude-haiku-3.5")
+	if haikuResolved.Shape || haikuResolved.Model.Enabled {
+		t.Fatalf("expected claude-haiku-3.5 to skip external-claude policy, got %+v", haikuResolved)
+	}
+
+	// claude-opus-4 matches only external-claude.
+	opusResolved := cfg.ResolvePolicy(ProtocolClaude, "claude-opus-4")
+	if !opusResolved.Shape || !opusResolved.Model.Enabled || !opusResolved.Model.Strict || opusResolved.Model.EffectiveMinScore() != 0.65 || opusResolved.Model.WaitMS != 5000 {
+		t.Fatalf("unexpected opus resolved policy: %+v", opusResolved)
+	}
+	if len(opusResolved.Words) != 2 || opusResolved.Words[0] != "BASE_SECRET" || opusResolved.Words[1] != "CLAUDE_ONLY_TERM" {
+		t.Fatalf("unexpected opus words: %#v", opusResolved.Words)
+	}
+	if opusResolved.EffectiveActions()["EMAIL"] != "warn" || opusResolved.EffectiveActions()["TERM"] != "block" {
+		t.Fatalf("unexpected opus actions: %#v", opusResolved.EffectiveActions())
+	}
+
+	// claude-sonnet-4 matches both policies in order; second policy resets EMAIL to mask.
+	sonnetResolved := cfg.ResolvePolicy(ProtocolClaude, "claude-sonnet-4")
+	if _, hasEmail := sonnetResolved.EffectiveActions()["EMAIL"]; hasEmail {
+		t.Fatalf("expected EMAIL action to be reset to mask, got %#v", sonnetResolved.EffectiveActions())
+	}
+	if sonnetResolved.EffectiveActions()["TERM"] != "block" {
+		t.Fatalf("expected TERM=block to carry forward, got %#v", sonnetResolved.EffectiveActions())
+	}
+
+	// Validation errors inside policies.
+	for _, bad := range []string{
+		"policies:\n  - name: bad-proto\n    protocols: [invalid-proto]\n",
+		"policies:\n  - name: bad-kind\n    kinds:\n      bogus: true\n",
+		"policies:\n  - name: bad-score\n    model:\n      min_score: 0.2\n",
+		"policies:\n  - name: bad-wait\n    model:\n      wait_ms: -5\n",
+		"policies:\n  - name: bad-action\n    actions:\n      EMAIL: drop\n",
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Fatalf("expected validation error for %q", bad)
+		}
+	}
+}

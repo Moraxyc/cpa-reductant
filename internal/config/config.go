@@ -132,28 +132,102 @@ func (m ModelConfig) Validate() error {
 }
 
 type RuleConfig struct {
-	Kind   string `yaml:"kind"`
-	Prefix string `yaml:"prefix"`
-	Regex  string `yaml:"regex"`
+	Kind   string `yaml:"kind" json:"kind"`
+	Prefix string `yaml:"prefix" json:"prefix,omitempty"`
+	Regex  string `yaml:"regex" json:"regex,omitempty"`
+}
+
+type ModelPolicyOverride struct {
+	Enabled  *bool    `yaml:"enabled" json:"enabled,omitempty"`
+	MinScore *float64 `yaml:"min_score" json:"min_score,omitempty"`
+	Strict   *bool    `yaml:"strict" json:"strict,omitempty"`
+	WaitMS   *int     `yaml:"wait_ms" json:"wait_ms,omitempty"`
+}
+
+func (m *ModelPolicyOverride) Validate() error {
+	if m == nil {
+		return nil
+	}
+	if m.MinScore != nil && *m.MinScore != 0 && (*m.MinScore < guard.Floor || *m.MinScore >= 1) {
+		return fmt.Errorf("policy model.min_score must be in [%.1f, 1.0), got %g", guard.Floor, *m.MinScore)
+	}
+	if m.WaitMS != nil && *m.WaitMS < 0 {
+		return fmt.Errorf("policy model.wait_ms must be >= 0, got %d", *m.WaitMS)
+	}
+	return nil
+}
+
+type PolicyFields struct {
+	Secrets      *bool                `yaml:"secrets" json:"secrets,omitempty"`
+	Personal     *bool                `yaml:"personal" json:"personal,omitempty"`
+	Kinds        map[string]bool      `yaml:"kinds" json:"kinds,omitempty"`
+	Words        []string             `yaml:"words" json:"words,omitempty"`
+	WordsAnyCase *bool                `yaml:"words_any_case" json:"words_any_case,omitempty"`
+	WordsWhole   *bool                `yaml:"words_whole" json:"words_whole,omitempty"`
+	Rules        []RuleConfig         `yaml:"rules" json:"rules,omitempty"`
+	Actions      map[string]string    `yaml:"actions" json:"actions,omitempty"`
+	Allow        []string             `yaml:"allow" json:"allow,omitempty"`
+	Shape        *bool                `yaml:"shape" json:"shape,omitempty"`
+	BlockTerms   *bool                `yaml:"block_terms" json:"block_terms,omitempty"`
+	Model        *ModelPolicyOverride `yaml:"model" json:"model,omitempty"`
+}
+
+func (p PolicyFields) Validate() error {
+	if err := p.Model.Validate(); err != nil {
+		return err
+	}
+	if err := validateKinds(p.Kinds); err != nil {
+		return err
+	}
+	if err := validateRules(p.Rules); err != nil {
+		return err
+	}
+	if err := validateActions(p.Actions); err != nil {
+		return err
+	}
+	return nil
+}
+
+type PolicyOverride struct {
+	Name          string   `yaml:"name" json:"name,omitempty"`
+	Models        []string `yaml:"models" json:"models,omitempty"`
+	ExcludeModels []string `yaml:"exclude_models" json:"exclude_models,omitempty"`
+	Protocols     []string `yaml:"protocols" json:"protocols,omitempty"`
+	PolicyFields  `yaml:",inline"`
+}
+
+func (p PolicyOverride) Matches(protocol, model string) bool {
+	normalized := NormalizeProtocol(protocol)
+	if len(p.Protocols) > 0 && !matchesAnyProtocol(p.Protocols, normalized) {
+		return false
+	}
+	if len(p.ExcludeModels) > 0 && matchesAnyModelPattern(p.ExcludeModels, model) {
+		return false
+	}
+	if len(p.Models) == 0 {
+		return true
+	}
+	return matchesAnyModelPattern(p.Models, model)
 }
 
 type Config struct {
 	Models        []string          `yaml:"models"`
 	ExcludeModels []string          `yaml:"exclude_models"`
 	Protocols     []string          `yaml:"protocols"`
-	Secrets      *bool             `yaml:"secrets"`
-	Personal     *bool             `yaml:"personal"`
-	Kinds        map[string]bool   `yaml:"kinds"`
-	Words        []string          `yaml:"words"`
-	WordsAnyCase bool              `yaml:"words_any_case"`
-	WordsWhole   bool              `yaml:"words_whole"`
-	Rules        []RuleConfig      `yaml:"rules"`
-	Actions      map[string]string `yaml:"actions"`
-	Allow        []string          `yaml:"allow"`
-	Shape        bool              `yaml:"shape"`
-	BlockTerms   bool              `yaml:"block_terms"`
-	KeyPath      string            `yaml:"key_path"`
-	Model        ModelConfig       `yaml:"model"`
+	Secrets       *bool             `yaml:"secrets"`
+	Personal      *bool             `yaml:"personal"`
+	Kinds         map[string]bool   `yaml:"kinds"`
+	Words         []string          `yaml:"words"`
+	WordsAnyCase  bool              `yaml:"words_any_case"`
+	WordsWhole    bool              `yaml:"words_whole"`
+	Rules         []RuleConfig      `yaml:"rules"`
+	Actions       map[string]string `yaml:"actions"`
+	Allow         []string          `yaml:"allow"`
+	Shape         bool              `yaml:"shape"`
+	BlockTerms    bool              `yaml:"block_terms"`
+	KeyPath       string            `yaml:"key_path"`
+	Model         ModelConfig       `yaml:"model"`
+	Policies      []PolicyOverride  `yaml:"policies"`
 }
 
 func SupportedProtocols() []string {
@@ -269,30 +343,34 @@ func (c *Config) EffectiveKeyPath() string {
 	return ""
 }
 
-func (c *Config) validate() error {
-	if err := c.Model.Validate(); err != nil {
-		return err
-	}
-	for k := range c.Kinds {
+func validateKinds(kinds map[string]bool) error {
+	for k := range kinds {
 		norm := strings.ToLower(strings.TrimSpace(k))
 		if !isValidKindCategory(norm) {
 			return fmt.Errorf("unsupported personal data category %q (supported: %s)", k, strings.Join(SupportedKinds(), ", "))
 		}
 	}
-	if len(c.Rules) > 0 {
-		raw := make([]redact.Rule, 0, len(c.Rules))
-		for _, r := range c.Rules {
-			raw = append(raw, redact.Rule{
-				Kind:   r.Kind,
-				Prefix: r.Prefix,
-				Regex:  r.Regex,
-			})
-		}
-		if _, err := redact.CheckRules(raw); err != nil {
-			return err
-		}
+	return nil
+}
+
+func validateRules(rules []RuleConfig) error {
+	if len(rules) == 0 {
+		return nil
 	}
-	for k, v := range c.Actions {
+	raw := make([]redact.Rule, 0, len(rules))
+	for _, r := range rules {
+		raw = append(raw, redact.Rule{
+			Kind:   r.Kind,
+			Prefix: r.Prefix,
+			Regex:  r.Regex,
+		})
+	}
+	_, err := redact.CheckRules(raw)
+	return err
+}
+
+func validateActions(actions map[string]string) error {
+	for k, v := range actions {
 		kind := strings.ToUpper(strings.TrimSpace(k))
 		if !redact.KindName(kind) {
 			return fmt.Errorf("invalid action kind %q (must match placeholder kind format, e.g. API_KEY, TERM)", k)
@@ -304,6 +382,180 @@ func (c *Config) validate() error {
 		}
 	}
 	return nil
+}
+
+func (c *Config) validate() error {
+	if err := c.Model.Validate(); err != nil {
+		return err
+	}
+	if err := validateKinds(c.Kinds); err != nil {
+		return err
+	}
+	if err := validateRules(c.Rules); err != nil {
+		return err
+	}
+	if err := validateActions(c.Actions); err != nil {
+		return err
+	}
+	for i, pol := range c.Policies {
+		label := strings.TrimSpace(pol.Name)
+		if label == "" {
+			label = fmt.Sprintf("#%d", i+1)
+		}
+		if err := pol.Validate(); err != nil {
+			return fmt.Errorf("policies[%s]: %w", label, err)
+		}
+		for _, proto := range pol.Protocols {
+			if !IsSupportedProtocol(proto) {
+				return fmt.Errorf("policies[%s]: unsupported protocol %q", label, proto)
+			}
+		}
+		if len(c.Rules)+len(pol.Rules) > redact.MaxRules {
+			return fmt.Errorf("policies[%s]: combined rules exceed maximum of %d", label, redact.MaxRules)
+		}
+	}
+	return nil
+}
+
+// EffectiveModelRunnerConfig returns the ModelConfig used to initialize the
+// shared model runner. If any per-route policy enables the local model, the
+// runner is marked enabled so weights can be prepared even when the global
+// default is disabled.
+func (c *Config) EffectiveModelRunnerConfig() ModelConfig {
+	if c == nil {
+		return ModelConfig{}
+	}
+	mc := c.Model
+	if !mc.Enabled {
+		for _, pol := range c.Policies {
+			if pol.Model != nil && pol.Model.Enabled != nil && *pol.Model.Enabled {
+				mc.Enabled = true
+				break
+			}
+		}
+	}
+	return mc
+}
+
+// ApplyOverride returns a copy of c with the given PolicyFields merged on top.
+// Pointer fields override when non-nil; Kinds and Actions merge by key (an
+// explicit "mask" action overrides a base warn/block action); Words, Rules, and
+// Allow append to the base lists.
+func (c *Config) ApplyOverride(ov PolicyFields) *Config {
+	var base Config
+	if c != nil {
+		base = *c
+	}
+	out := base
+	out.Models = slices.Clone(base.Models)
+	out.ExcludeModels = slices.Clone(base.ExcludeModels)
+	out.Protocols = slices.Clone(base.Protocols)
+	out.Words = slices.Clone(base.Words)
+	out.Rules = slices.Clone(base.Rules)
+	out.Allow = slices.Clone(base.Allow)
+	out.Policies = nil
+
+	if len(base.Kinds) > 0 {
+		out.Kinds = make(map[string]bool, len(base.Kinds)+len(ov.Kinds))
+		for k, v := range base.Kinds {
+			out.Kinds[strings.ToLower(strings.TrimSpace(k))] = v
+		}
+	}
+	if len(base.Actions) > 0 {
+		out.Actions = make(map[string]string, len(base.Actions)+len(ov.Actions))
+		for k, v := range base.Actions {
+			out.Actions[strings.ToUpper(strings.TrimSpace(k))] = strings.ToLower(strings.TrimSpace(v))
+		}
+	}
+
+	if ov.Secrets != nil {
+		v := *ov.Secrets
+		out.Secrets = &v
+	}
+	if ov.Personal != nil {
+		v := *ov.Personal
+		out.Personal = &v
+	}
+	if len(ov.Kinds) > 0 {
+		if out.Kinds == nil {
+			out.Kinds = make(map[string]bool, len(ov.Kinds))
+		}
+		for k, v := range ov.Kinds {
+			norm := strings.ToLower(strings.TrimSpace(k))
+			if norm != "" {
+				out.Kinds[norm] = v
+			}
+		}
+	}
+	if len(ov.Words) > 0 {
+		out.Words = append(out.Words, ov.Words...)
+	}
+	if ov.WordsAnyCase != nil {
+		out.WordsAnyCase = *ov.WordsAnyCase
+	}
+	if ov.WordsWhole != nil {
+		out.WordsWhole = *ov.WordsWhole
+	}
+	if len(ov.Rules) > 0 {
+		out.Rules = append(out.Rules, ov.Rules...)
+	}
+	if len(ov.Actions) > 0 {
+		if out.Actions == nil {
+			out.Actions = make(map[string]string, len(ov.Actions))
+		}
+		for k, v := range ov.Actions {
+			kind := strings.ToUpper(strings.TrimSpace(k))
+			if kind == "" {
+				continue
+			}
+			act := strings.ToLower(strings.TrimSpace(v))
+			if act == "" || act == "mask" {
+				out.Actions[kind] = "mask"
+			} else {
+				out.Actions[kind] = act
+			}
+		}
+	}
+	if len(ov.Allow) > 0 {
+		out.Allow = append(out.Allow, ov.Allow...)
+	}
+	if ov.Shape != nil {
+		out.Shape = *ov.Shape
+	}
+	if ov.BlockTerms != nil {
+		out.BlockTerms = *ov.BlockTerms
+	}
+	if ov.Model != nil {
+		if ov.Model.Enabled != nil {
+			out.Model.Enabled = *ov.Model.Enabled
+		}
+		if ov.Model.MinScore != nil {
+			out.Model.MinScore = *ov.Model.MinScore
+		}
+		if ov.Model.Strict != nil {
+			out.Model.Strict = *ov.Model.Strict
+		}
+		if ov.Model.WaitMS != nil {
+			out.Model.WaitMS = *ov.Model.WaitMS
+		}
+	}
+	return &out
+}
+
+// ResolvePolicy returns the effective Config for the given (protocol, model)
+// after applying all matching PolicyOverride entries in declaration order.
+// Returns c directly when no overrides match.
+func (c *Config) ResolvePolicy(protocol, model string) *Config {
+	if c == nil || len(c.Policies) == 0 {
+		return c
+	}
+	resolved := c
+	for _, pol := range c.Policies {
+		if pol.Matches(protocol, model) {
+			resolved = resolved.ApplyOverride(pol.PolicyFields)
+		}
+	}
+	return resolved
 }
 
 func NormalizeProtocol(raw string) string {
@@ -432,6 +684,7 @@ func Metadata() pluginapi.Metadata {
 			{Name: "block_terms", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Reject instead of masking configured terms"},
 			{Name: "key_path", Type: pluginapi.ConfigFieldTypeString, Description: "Path to persist the 32-byte placeholder HMAC key across restarts"},
 			{Name: "model", Type: pluginapi.ConfigFieldTypeObject, Description: "Local PII NER model (astrlink-guard): set enabled=true (auto-downloads by default unless auto_download=false); fields: enabled, auto_download, name, dir, min_score, strict, wait_ms, mirror"},
+			{Name: "policies", Type: pluginapi.ConfigFieldTypeArray, Description: "Per-model / per-protocol policy overrides matched in order ({name, models, exclude_models, protocols, secrets, personal, kinds, words, rules, actions, allow, shape, block_terms, model})"},
 		},
 	}
 }

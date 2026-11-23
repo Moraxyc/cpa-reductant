@@ -58,6 +58,7 @@ type PolicySummary struct {
 	RulesCount        int               `json:"rules_count"`
 	Actions           map[string]string `json:"actions,omitempty"`
 	AllowCount        int               `json:"allow_count"`
+	PoliciesCount     int               `json:"policies_count,omitempty"`
 	Shape             bool              `json:"shape"`
 	KeyPathConfigured bool              `json:"key_path_configured"`
 	KeyPathActive     bool              `json:"key_path_active"`
@@ -334,7 +335,7 @@ func New(cfg *config.Config) *Engine {
 		redact.SetKeyPath(keyPath)
 	}
 	e := &Engine{
-		model:          newModelRunner(cfg.Model),
+		model:          newModelRunner(cfg.EffectiveModelRunnerConfig()),
 		events:         newEventRing(defaultEventRing),
 		capture:        newDebugCapture(defaultCaptureCapacity),
 		startedAt:      time.Now().UTC(),
@@ -408,7 +409,7 @@ func (e *Engine) Update(cfg *config.Config) {
 
 	e.cfg.Store(cfg)
 	if e.model != nil {
-		e.model.Configure(cfg.Model)
+		e.model.Configure(cfg.EffectiveModelRunnerConfig())
 	}
 }
 
@@ -515,6 +516,7 @@ func (e *Engine) StatusWithOptions(eventLimit int, actionFilter string) Status {
 			RulesCount:        len(cfg.EffectiveRules()),
 			Actions:           cfg.EffectiveActions(),
 			AllowCount:        len(cfg.Allow),
+			PoliciesCount:     len(cfg.Policies),
 			Shape:             cfg.Shape,
 			KeyPathConfigured: keyPath != "",
 			KeyPathActive:     keyActive,
@@ -619,7 +621,7 @@ func (e *Engine) MaskJSONContext(ctx context.Context, route string, body []byte)
 func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte) (out []byte, err error) {
 	start := time.Now()
 	e.lockKeyPath()
-	cfg := e.Config()
+	cfg := e.Config().ResolvePolicy(meta.Protocol, meta.Model)
 	captureID := meta.CaptureID
 	if captureID == 0 {
 		captureID = e.BeginCapture()
@@ -907,7 +909,7 @@ func (e *Engine) RestoreResponseWithMeta(meta RequestMeta, contentType string, b
 		})
 	}
 	if meta.CaptureID != 0 && e.capture != nil {
-		cfg := e.Config()
+		cfg := e.Config().ResolvePolicy(meta.Protocol, meta.Model)
 		shape := cfg != nil && cfg.Shape
 		upStr, upBytes, upTrunc := truncateCaptureBytes(body, maxCaptureBodyBytes)
 		resStr, resBytes, resTrunc := truncateCaptureBytes(out, maxCaptureBodyBytes)
