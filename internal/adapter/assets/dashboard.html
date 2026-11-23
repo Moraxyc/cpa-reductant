@@ -157,7 +157,7 @@
       <div class="card-head">
         <button class="fold-btn" type="button" aria-expanded="true">
           <span class="fold-arrow" aria-hidden="true"></span>
-          <span class="fold-label">{{.T "kind.title"}} <span class="sub">{{.T "kind.description"}}</span></span>
+          <span class="fold-label">{{.T "kind.title"}}</span>
         </button>
       </div>
       <div class="card-body">
@@ -183,7 +183,7 @@
       <div class="card-head">
         <button class="fold-btn" type="button" aria-expanded="true">
           <span class="fold-arrow" aria-hidden="true"></span>
-          <span class="fold-label">{{.T "finder.title"}} <span class="sub">{{.T "finder.description"}}</span></span>
+          <span class="fold-label">{{.T "finder.title"}}</span>
         </button>
       </div>
       <div class="card-body">
@@ -272,7 +272,7 @@
     <div class="card-head">
       <button class="fold-btn" type="button" aria-expanded="true">
         <span class="fold-arrow" aria-hidden="true"></span>
-        <span class="fold-label">{{.T "events.title"}} <span class="sub">{{.T "events.privacy_notice"}} · {{.Tf "events.count" "count" (len .Status.RecentEvents)}}</span></span>
+        <span class="fold-label">{{.T "events.title"}} <span class="sub">{{.Tf "events.count" "count" (len .Status.RecentEvents)}}</span></span>
       </button>
       <span class="actions">
         <a class="btn {{if eq .ActionFilter ""}}active{{end}}" href="{{.ActionHref ""}}" onclick="setCardFold('events',false)">{{.T "events.all"}}</a>

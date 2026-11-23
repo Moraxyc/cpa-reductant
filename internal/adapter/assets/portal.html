@@ -61,7 +61,7 @@ body.embedded .auth-wrap{margin-top:12px}
     <div class="card-head">
       <button class="fold-btn" type="button" aria-expanded="true">
         <span class="fold-arrow" aria-hidden="true"></span>
-        <span class="fold-label"><span data-i18n="model.title"></span> <span class="sub" data-i18n="model.description_portal"></span></span>
+        <span class="fold-label"><span data-i18n="model.title"></span> <span class="sub" data-i18n="model.description"></span></span>
       </button>
       <span class="actions">
         <span id="model-status-badge" class="badge badge-muted" data-i18n="common.loading"></span>
@@ -86,7 +86,7 @@ body.embedded .auth-wrap{margin-top:12px}
       <div class="card-head">
         <button class="fold-btn" type="button" aria-expanded="true">
           <span class="fold-arrow" aria-hidden="true"></span>
-          <span class="fold-label"><span data-i18n="kind.title"></span> <span class="sub" data-i18n="kind.description"></span></span>
+          <span class="fold-label" data-i18n="kind.title"></span>
         </button>
       </div>
       <div class="card-body">
@@ -97,7 +97,7 @@ body.embedded .auth-wrap{margin-top:12px}
       <div class="card-head">
         <button class="fold-btn" type="button" aria-expanded="true">
           <span class="fold-arrow" aria-hidden="true"></span>
-          <span class="fold-label"><span data-i18n="finder.title"></span> <span class="sub" data-i18n="finder.description"></span></span>
+          <span class="fold-label" data-i18n="finder.title"></span>
         </button>
       </div>
       <div class="card-body">
@@ -135,7 +135,7 @@ body.embedded .auth-wrap{margin-top:12px}
     <div class="card-head">
       <button class="fold-btn" type="button" aria-expanded="true">
         <span class="fold-arrow" aria-hidden="true"></span>
-        <span class="fold-label"><span data-i18n="events.title"></span> <span class="sub"><span data-i18n="events.privacy_notice"></span><span id="events-count"></span></span></span>
+        <span class="fold-label"><span data-i18n="events.title"></span> <span id="events-count" class="sub"></span></span>
       </button>
       <span id="event-filters" class="actions"></span>
     </div>
@@ -581,7 +581,7 @@ body.embedded .auth-wrap{margin-top:12px}
 
     var events = st.recent_events || [];
     var countEl = document.getElementById('events-count');
-    countEl.textContent = ' · ' + t('events.count', {count: events.length});
+    countEl.textContent = t('events.count', {count: events.length});
     var evEl = document.getElementById('events-table');
     if(!events.length){
       evEl.innerHTML = '<div class="empty">' + textHTML('common.empty') + '</div>';
