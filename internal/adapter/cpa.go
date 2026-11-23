@@ -21,6 +21,7 @@ import (
 const (
 	managementBasePath          = "/v0/management"
 	managementStatusPath        = "/cpa-reductant/status"
+	managementMetricsPath       = "/cpa-reductant/metrics"
 	managementUIPath            = "/cpa-reductant/ui"
 	managementPreviewPath       = "/cpa-reductant/preview"
 	managementDebugCapturePath  = "/cpa-reductant/debug/capture"
@@ -318,6 +319,11 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 				},
 				{
 					Method:      http.MethodGet,
+					Path:        managementMetricsPath,
+					Description: "Export cpa-reductant telemetry in Prometheus text exposition format",
+				},
+				{
+					Method:      http.MethodGet,
 					Path:        managementUIPath,
 					Description: "Visual observability dashboard for cpa-reductant (HTML)",
 				},
@@ -411,6 +417,15 @@ func (p *Plugin) handleManagement(req pluginapi.ManagementRequest) pluginapi.Man
 			return renderDashboardHTML(st, baseURL, actionFilter, eventLimit, refreshSec, resolveLocale(req), explicitLang)
 		}
 		return jsonManagementResponse(http.StatusOK, st)
+	case method == http.MethodGet && path == managementMetricsPath:
+		return pluginapi.ManagementResponse{
+			StatusCode: http.StatusOK,
+			Headers: http.Header{
+				"Content-Type":  {engine.PrometheusContentType},
+				"Cache-Control": {"no-store"},
+			},
+			Body: []byte(p.engine.PrometheusMetrics()),
+		}
 	case method == http.MethodPost && path == managementPreviewPath:
 		var body engine.PreviewRequest
 		if len(bytes.TrimSpace(req.Body)) == 0 {

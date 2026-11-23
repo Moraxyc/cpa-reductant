@@ -878,8 +878,8 @@ func TestManagementStatusAndPreview(t *testing.T) {
 		t.Fatalf("management.register: %v", err)
 	}
 	mgmtReg := routesResp.(pluginapi.ManagementRegistrationResponse)
-	if len(mgmtReg.Routes) != 7 || len(mgmtReg.Resources) != 1 {
-		t.Fatalf("expected 7 authenticated management routes and 1 resource portal route, got routes=%#v resources=%#v", mgmtReg.Routes, mgmtReg.Resources)
+	if len(mgmtReg.Routes) != 8 || len(mgmtReg.Resources) != 1 {
+		t.Fatalf("expected 8 authenticated management routes and 1 resource portal route, got routes=%#v resources=%#v", mgmtReg.Routes, mgmtReg.Resources)
 	}
 	for _, r := range mgmtReg.Routes {
 		if r.Menu != "" {
@@ -1773,4 +1773,27 @@ func TestLifecycleContextCancellationOnShutdown(t *testing.T) {
 		t.Fatalf("expected fresh lifecycle context after register, got %v", err)
 	}
 	p.Shutdown()
+}
+
+func TestManagementMetricsRoute(t *testing.T) {
+	p := NewPlugin(engine.New(nil), &fakeHost{})
+	defer p.Shutdown()
+
+	raw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/management/cpa-reductant/metrics",
+	}))
+	if err != nil {
+		t.Fatalf("metrics route: %v", err)
+	}
+	resp := raw.(pluginapi.ManagementResponse)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Headers.Get("Content-Type"); ct != engine.PrometheusContentType {
+		t.Fatalf("Content-Type = %q, want %q", ct, engine.PrometheusContentType)
+	}
+	if !strings.Contains(string(resp.Body), "cpa_reductant_requests_total 0") {
+		t.Fatalf("unexpected metrics body: %s", resp.Body)
+	}
 }
