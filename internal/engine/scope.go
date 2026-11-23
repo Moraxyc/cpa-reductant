@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	defaultScopeMaxScopes   = 4096
-	defaultScopeMaxEntries  = 10000
-	defaultScopeTTL         = 24 * time.Hour
+	defaultScopeMaxScopes  = 4096
+	defaultScopeMaxEntries = 10000
+	defaultScopeTTL        = 24 * time.Hour
 )
 
 // ScopeStats exposes multi-tenant scope isolation telemetry.
@@ -31,10 +31,10 @@ type ScopeStats struct {
 }
 
 type scopeEntry struct {
-	scope      string
-	lastUsed   time.Time
-	items      map[string]*list.Element // placeholder -> *list.Element of string
-	order      *list.List               // MRU at front
+	scope    string
+	lastUsed time.Time
+	items    map[string]*list.Element // placeholder -> *list.Element of string
+	order    *list.List               // MRU at front
 }
 
 type scopeVault struct {

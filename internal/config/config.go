@@ -32,13 +32,13 @@ const (
 
 	DefaultProtocol = ProtocolClaude
 
-	ModelAstrLinkGuard = "astrlink-guard"
-	ModelProviderLocal = "astrlink-guard"
-	ModelProviderHTTP  = "http"
-	ModelFormatGeneric = "generic"
+	ModelAstrLinkGuard  = "astrlink-guard"
+	ModelProviderLocal  = "astrlink-guard"
+	ModelProviderHTTP   = "http"
+	ModelFormatGeneric  = "generic"
 	ModelFormatPresidio = "presidio"
-	EnvModelDir        = "CPA_REDUCTANT_MODEL_DIR"
-	EnvKeyPath         = "CPA_REDUCTANT_KEY_PATH"
+	EnvModelDir         = "CPA_REDUCTANT_MODEL_DIR"
+	EnvKeyPath          = "CPA_REDUCTANT_KEY_PATH"
 
 	DefaultModelWaitMS       = 2000
 	DefaultModelStrictWaitMS = 15000
