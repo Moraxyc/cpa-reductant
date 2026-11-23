@@ -276,7 +276,7 @@ jobs:
             fi
             echo ""
             echo "### 适配 Checklist"
-            echo "- 完整升级步骤见 \`docs/DEVELOPMENT.md\` 的「上游适配与升级流程」章节。"
+            echo "- 完整升级步骤见 \`docs/zh/DEVELOPMENT.md\`（[English](docs/en/DEVELOPMENT.md)）的「上游适配与升级流程」章节。"
             echo "- 全部对齐后，下次巡检会自动关闭本 Issue（也可在合并修复后手动关闭）。"
           } > .watch/issue_body.md
 

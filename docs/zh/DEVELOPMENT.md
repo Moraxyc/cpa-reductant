@@ -1,6 +1,8 @@
+[English](../en/DEVELOPMENT.md) | **简体中文**
+
 # 开发者指南
 
-本文档面向 `cpa-reductant` 的贡献者与二次开发者，介绍项目架构、Magpie 补丁机制、源码构建与测试流程。如果你只是想在 CLIProxyAPI 中安装和使用本插件，请返回 [README](../README.md)。
+本文档面向 `cpa-reductant` 的贡献者与二次开发者，介绍项目架构、Magpie 补丁机制、源码构建与测试流程。如果你只是想在 CLIProxyAPI 中安装和使用本插件，请返回 [README](README.md)。
 
 ## 架构与工作原理
 
