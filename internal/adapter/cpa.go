@@ -373,17 +373,18 @@ func (p *Plugin) handleManagement(req pluginapi.ManagementRequest) pluginapi.Man
 		}
 		return jsonManagementResponse(http.StatusOK, st)
 	case method == http.MethodPost && path == managementPreviewPath:
-		var body struct {
-			Text string `json:"text"`
-		}
+		var body engine.PreviewRequest
 		if len(bytes.TrimSpace(req.Body)) == 0 {
 			return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": "request body is required"})
 		}
 		if err := json.Unmarshal(req.Body, &body); err != nil {
 			return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		}
-		res, err := p.engine.Preview(context.Background(), body.Text)
+		res, err := p.engine.PreviewWithOptions(context.Background(), body)
 		if err != nil {
+			if errors.Is(err, engine.ErrInvalidPreviewRequest) {
+				return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
+			}
 			if errors.Is(err, engine.ErrModelUnavailable) {
 				return jsonManagementResponse(http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 			}

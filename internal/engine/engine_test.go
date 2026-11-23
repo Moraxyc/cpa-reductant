@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/moraxyc/cpa-reductant/internal/config"
+	"github.com/yetone/magpie/pkg/redact"
 )
 
 func TestEnginePolicyRulesActionsAllowShapeAndStats(t *testing.T) {
@@ -427,19 +428,110 @@ policies:
 	masked, err := eng.MaskRequest(context.Background(), RequestMeta{
 		Protocol: config.ProtocolOpenAI,
 		Model:    "gpt-5",
-	}, []byte(`{"text":"SYNTHETIC-POLICY-TERM alice@example.com"}`))
+	}, []byte(`{"text":"SYNTHETIC-POLICY-TERM alice@contoso.io"}`))
 	if err != nil {
 		t.Fatalf("expected gpt-5 to succeed, got %v", err)
 	}
 	if strings.Contains(string(masked), "SYNTHETIC-POLICY-TERM") {
 		t.Fatalf("expected term to be masked on gpt-5: %s", masked)
 	}
-	if !strings.Contains(string(masked), "alice@example.com") {
+	if !strings.Contains(string(masked), "alice@contoso.io") {
 		t.Fatalf("expected email to pass through with warn on openai: %s", masked)
 	}
 
 	st := eng.Status()
-	if st.Policy.PoliciesCount != 2 {
-		t.Fatalf("expected PoliciesCount=2, got %d", st.Policy.PoliciesCount)
+	if st.Policy.PoliciesCount != 2 || st.Stats.HitsWarned == 0 {
+		t.Fatalf("expected PoliciesCount=2 and warn hit recorded, got policies=%d warned=%d", st.Policy.PoliciesCount, st.Stats.HitsWarned)
+	}
+}
+
+func TestEnginePreviewJSONAndWhatIfOverrides(t *testing.T) {
+	cfg, err := config.Parse([]byte(`
+words: [SYNTHETIC-PREVIEW-JSON-ONLY]
+policies:
+  - name: block-claude
+    models: ["claude-*"]
+    block_terms: true
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	eng := New(cfg)
+	defer eng.Close()
+
+	// JSON mode preserves kept protocol keys (model, id, role) while masking content and tool_use input fields.
+	sample := `{
+		"model": "claude-sonnet-4",
+		"id": "SYNTHETIC-PREVIEW-JSON-ONLY",
+		"messages": [
+			{"role": "user", "content": "reach alice@contoso.io about SYNTHETIC-PREVIEW-JSON-ONLY"},
+			{"role": "assistant", "content": [{"type": "tool_use", "id": "tu_1", "name": "lookup", "input": {"name": "SYNTHETIC-PREVIEW-JSON-ONLY"}}]}
+		]
+	}`
+	res, err := eng.PreviewWithOptions(context.Background(), PreviewRequest{
+		Text:  sample,
+		Mode:  PreviewModeJSON,
+		Model: "claude-sonnet-4",
+	})
+	if err != nil {
+		t.Fatalf("PreviewWithOptions json: %v", err)
+	}
+	if res.Mode != PreviewModeJSON || !res.Blocked {
+		t.Fatalf("expected mode=json and blocked=true for claude-sonnet-4, got %+v", res)
+	}
+	if !strings.Contains(res.Masked, `"model": "claude-sonnet-4"`) {
+		t.Fatalf("expected model key preserved: %s", res.Masked)
+	}
+	if !strings.Contains(res.Masked, `"id": "SYNTHETIC-PREVIEW-JSON-ONLY"`) {
+		t.Fatalf("expected top-level id key preserved: %s", res.Masked)
+	}
+	if strings.Contains(res.Masked, "alice@contoso.io") {
+		t.Fatalf("expected email masked in message content: %s", res.Masked)
+	}
+	// Tool input "name" must be masked even though top-level "name" is kept.
+	if strings.Contains(res.Masked, `"name": "SYNTHETIC-PREVIEW-JSON-ONLY"`) {
+		t.Fatalf("expected tool_use input.name to be masked: %s", res.Masked)
+	}
+	// Verify preview did not store placeholder or mutate stats.
+	for _, h := range res.Hits {
+		if h.Kind == "TERM" && h.Placeholder != "" {
+			if _, ok := redact.Value(h.Placeholder); ok {
+				t.Fatalf("preview unexpectedly persisted placeholder %s", h.Placeholder)
+			}
+		}
+	}
+	if eng.Status().Stats.RequestsTotal != 0 {
+		t.Fatalf("preview must not mutate stats")
+	}
+
+	// What-if override: add temporary allow and extra word without mutating engine config.
+	shapeOn := true
+	whatIf, err := eng.PreviewWithOptions(context.Background(), PreviewRequest{
+		Text: "contact alice@contoso.io about TEMP-WHATIF-WORD",
+		Override: &config.PolicyFields{
+			Words: []string{"TEMP-WHATIF-WORD"},
+			Allow: []string{"alice@contoso.io"},
+			Shape: &shapeOn,
+		},
+	})
+	if err != nil {
+		t.Fatalf("what-if preview: %v", err)
+	}
+	if !strings.Contains(whatIf.Masked, "alice@contoso.io") {
+		t.Fatalf("expected override allow to pass email unmasked: %s", whatIf.Masked)
+	}
+	if strings.Contains(whatIf.Masked, "TEMP-WHATIF-WORD") {
+		t.Fatalf("expected override word to be masked: %s", whatIf.Masked)
+	}
+
+	// Invalid mode / invalid JSON / invalid override return ErrInvalidPreviewRequest.
+	for _, bad := range []PreviewRequest{
+		{Text: "hi", Mode: "xml"},
+		{Text: "{not-json", Mode: PreviewModeJSON},
+		{Text: "hi", Override: &config.PolicyFields{Actions: map[string]string{"EMAIL": "drop"}}},
+	} {
+		if _, err := eng.PreviewWithOptions(context.Background(), bad); !errors.Is(err, ErrInvalidPreviewRequest) {
+			t.Fatalf("expected ErrInvalidPreviewRequest for %+v, got %v", bad, err)
+		}
 	}
 }

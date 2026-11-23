@@ -372,6 +372,16 @@
       </button>
     </div>
     <div class="card-body">
+    <div class="actions" style="margin-bottom:8px;flex-wrap:wrap">
+      <select id="preview-mode" class="select" aria-label="{{.T "preview.mode_label"}}">
+        <option value="text">{{.T "preview.mode_text"}}</option>
+        <option value="json">{{.T "preview.mode_json"}}</option>
+      </select>
+      <input id="preview-model" class="select mono" type="text" style="min-width:170px" placeholder="{{.T "preview.model_placeholder"}}">
+      <input id="preview-words" class="select mono" type="text" style="min-width:170px" placeholder="{{.T "preview.words_placeholder"}}">
+      <input id="preview-allow" class="select mono" type="text" style="min-width:170px" placeholder="{{.T "preview.allow_placeholder"}}">
+      <label class="sub" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input id="preview-shape" type="checkbox"> {{.T "preview.shape_toggle"}}</label>
+    </div>
     <textarea id="preview-input" placeholder="{{.T "preview.placeholder"}}"></textarea>
     <div class="actions" style="margin-top:8px">
       <button class="btn" type="button" onclick="runPreview()">{{.T "preview.test"}}</button>
@@ -506,18 +516,36 @@ function clearCapture(){
   capState.openIDs = {};
   return callCapture('DELETE');
 }
+function splitCSV(s){
+  return (s || '').split(',').map(function(x){ return x.trim(); }).filter(Boolean);
+}
 async function runPreview(){
   var previewURL = {{.PreviewURL}};
   var input=document.getElementById('preview-input').value;
   var out=document.getElementById('preview-out');
   var meta=document.getElementById('preview-meta');
   if(!input){return;}
+  var payload={
+    text:input,
+    mode:(document.getElementById('preview-mode')||{}).value||'text'
+  };
+  var model=((document.getElementById('preview-model')||{}).value||'').trim();
+  if(model){payload.model=model;}
+  var words=splitCSV((document.getElementById('preview-words')||{}).value);
+  var allow=splitCSV((document.getElementById('preview-allow')||{}).value);
+  var shapeEl=document.getElementById('preview-shape');
+  if(words.length||allow.length||(shapeEl&&shapeEl.checked)){
+    payload.override={};
+    if(words.length){payload.override.words=words;}
+    if(allow.length){payload.override.allow=allow;}
+    if(shapeEl&&shapeEl.checked){payload.override.shape=true;}
+  }
   meta.textContent=t('preview.processing');
   try{
     var resp=await fetch(previewURL,{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:input})
+      body:JSON.stringify(payload)
     });
     var data=await resp.json();
     if(!resp.ok){
@@ -532,7 +560,7 @@ async function runPreview(){
       return '- '+h.Kind+' ['+(h.By||'-')+'] '+t('action.' + (h.Action || 'mask'))+' '+(h.Head?h.Head+'*** ':'')+'('+t('common.character_count', {count: h.Len})+') -> '+(h.Placeholder||'');
     }).join('\n');
     out.textContent=t('preview.result')+'\n'+data.masked+'\n\n'+t('preview.hits')+'\n'+(hits||t('preview.no_hits'));
-    meta.textContent=t('preview.metrics', {ms: data.duration_ms, count: hitsList.length});
+    meta.textContent=t('preview.metrics', {ms: data.duration_ms, count: hitsList.length})+(data.blocked?t('preview.blocked_suffix'):'');
   }catch(e){
     out.style.display='block';
     out.textContent=t('preview.request_failed_help', {endpoint: previewURL, error: e});

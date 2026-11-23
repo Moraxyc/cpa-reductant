@@ -78,6 +78,8 @@ type Status struct {
 }
 
 type PreviewResult struct {
+	Mode       string       `json:"mode,omitempty"`
+	Blocked    bool         `json:"blocked,omitempty"`
 	Masked     string       `json:"masked"`
 	Hits       []redact.Hit `json:"hits,omitempty"`
 	DurationMS float64      `json:"duration_ms"`
@@ -798,32 +800,6 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 		})
 	}
 	return masked, nil
-}
-
-func (e *Engine) Preview(ctx context.Context, text string) (res PreviewResult, err error) {
-	start := time.Now()
-	e.lockKeyPath()
-	cfg := e.Config()
-	var hits []redact.Hit
-	var modelErr error
-	options := e.redactOptions(ctx, cfg, "", func(hit redact.Hit) {
-		hits = append(hits, hit)
-	}, &modelErr)
-	defer func() {
-		if rec := recover(); rec != nil {
-			res = PreviewResult{}
-			err = fmt.Errorf("redaction preview panic: %v", rec)
-		}
-	}()
-	masked := redact.Preview(text, options)
-	if modelErr != nil {
-		return PreviewResult{}, modelErr
-	}
-	return PreviewResult{
-		Masked:     masked,
-		Hits:       hits,
-		DurationMS: roundMS(float64(time.Since(start).Microseconds()) / 1000.0),
-	}, nil
 }
 
 func (e *Engine) RestoreJSON(body []byte) []byte {

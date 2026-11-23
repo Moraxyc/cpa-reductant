@@ -178,6 +178,16 @@ body.embedded .auth-wrap{margin-top:12px}
       </button>
     </div>
     <div class="card-body">
+      <div class="actions" style="margin-bottom:8px;flex-wrap:wrap">
+        <select id="preview-mode" class="select" data-i18n-aria="preview.mode_label">
+          <option value="text" data-i18n="preview.mode_text"></option>
+          <option value="json" data-i18n="preview.mode_json"></option>
+        </select>
+        <input id="preview-model" class="select mono" type="text" style="min-width:170px" data-i18n-placeholder="preview.model_placeholder">
+        <input id="preview-words" class="select mono" type="text" style="min-width:170px" data-i18n-placeholder="preview.words_placeholder">
+        <input id="preview-allow" class="select mono" type="text" style="min-width:170px" data-i18n-placeholder="preview.allow_placeholder">
+        <label class="sub" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input id="preview-shape" type="checkbox"> <span data-i18n="preview.shape_toggle"></span></label>
+      </div>
       <textarea id="preview-input" data-i18n-placeholder="preview.placeholder"></textarea>
       <div class="actions" style="margin-top:8px">
         <button class="btn" type="button" onclick="runPreview()" data-i18n="preview.test"></button>
@@ -929,7 +939,11 @@ body.embedded .auth-wrap{margin-top:12px}
   function renderPreviewMeta(){
     var data = state.lastPreview && state.lastPreview.data;
     document.getElementById('preview-meta').textContent = state.previewPending ? t('preview.processing') :
-      data ? t('preview.metrics', {ms: data.duration_ms, count: (data.hits || []).length}) : '';
+      data ? t('preview.metrics', {ms: data.duration_ms, count: (data.hits || []).length}) + (data.blocked ? t('preview.blocked_suffix') : '') : '';
+  }
+
+  function splitCSV(s){
+    return (s || '').split(',').map(function(x){ return x.trim(); }).filter(Boolean);
   }
 
   function renderPreview(result){
@@ -951,6 +965,21 @@ body.embedded .auth-wrap{margin-top:12px}
   window.runPreview = async function(){
     var input = document.getElementById('preview-input').value;
     if(!input || !state.key) return;
+    var payload = {
+      text: input,
+      mode: (document.getElementById('preview-mode') || {}).value || 'text'
+    };
+    var model = ((document.getElementById('preview-model') || {}).value || '').trim();
+    if(model) payload.model = model;
+    var words = splitCSV((document.getElementById('preview-words') || {}).value);
+    var allow = splitCSV((document.getElementById('preview-allow') || {}).value);
+    var shapeEl = document.getElementById('preview-shape');
+    if(words.length || allow.length || (shapeEl && shapeEl.checked)){
+      payload.override = {};
+      if(words.length) payload.override.words = words;
+      if(allow.length) payload.override.allow = allow;
+      if(shapeEl && shapeEl.checked) payload.override.shape = true;
+    }
     state.previewPending = true;
     renderPreviewMeta();
     try{
@@ -960,7 +989,7 @@ body.embedded .auth-wrap{margin-top:12px}
           'Authorization': 'Bearer ' + state.key,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({text: input})
+        body: JSON.stringify(payload)
       });
       if(resp.status === 401 || resp.status === 403){
         showAuth('auth.denied', {status: resp.status});
