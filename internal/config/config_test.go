@@ -56,6 +56,77 @@ protocols: [chat-completions, responses]
 	}
 }
 
+func TestModelGlobAndExcludeModels(t *testing.T) {
+	cases := []struct {
+		pattern string
+		model   string
+		want    bool
+	}{
+		{"claude-*", "claude-sonnet-4", true},
+		{"claude-*", "gpt-5", false},
+		{"ollama/*", "ollama/qwen2.5:32b", true},
+		{"ollama/*", "ollama/a/b", true},
+		{"gpt-?-mini", "gpt-4-mini", true},
+		{"gpt-?-mini", "gpt-40-mini", false},
+		{"*codex*", "gpt-5-codex-test", true},
+		{"*", "anything/at/all", true},
+		{"", "anything", false},
+		{"  claude-*  ", "claude-opus", true},
+	}
+	for _, tc := range cases {
+		if got := MatchModelPattern(tc.pattern, tc.model); got != tc.want {
+			t.Errorf("MatchModelPattern(%q, %q) = %t, want %t", tc.pattern, tc.model, got, tc.want)
+		}
+	}
+
+	// Empty models + exclude_models: protect everything except excluded patterns.
+	excludeOnly, err := Parse([]byte(`
+exclude_models:
+  - "ollama/*"
+  - "local-*"
+  - "gpt-?-local"
+`))
+	if err != nil {
+		t.Fatalf("parse excludeOnly: %v", err)
+	}
+	if !excludeOnly.AllowsModel(ProtocolOpenAI, "gpt-5") {
+		t.Fatal("expected gpt-5 to be allowed")
+	}
+	for _, skipped := range []string{"ollama/llama3", "local-qwen", "gpt-4-local"} {
+		if excludeOnly.AllowsModel(ProtocolOpenAI, skipped) {
+			t.Fatalf("expected %q to be excluded", skipped)
+		}
+	}
+
+	// Glob models + exclude_models: exclude_models takes precedence.
+	combined, err := Parse([]byte(`
+models:
+  - "claude-*"
+  - "gpt-*"
+exclude_models:
+  - "claude-haiku-*"
+  - "gpt-4o-mini"
+`))
+	if err != nil {
+		t.Fatalf("parse combined: %v", err)
+	}
+	if !combined.AllowsModel(ProtocolClaude, "claude-sonnet-4") {
+		t.Fatal("expected claude-sonnet-4 to match claude-*")
+	}
+	if combined.AllowsModel(ProtocolClaude, "claude-haiku-3.5") {
+		t.Fatal("expected exclude_models to override claude-*")
+	}
+	if combined.AllowsModel(ProtocolOpenAI, "gpt-4o-mini") {
+		t.Fatal("expected exact exclude_models to override gpt-*")
+	}
+	if !combined.AllowsModel(ProtocolOpenAI, "gpt-5") {
+		t.Fatal("expected gpt-5 to match gpt-*")
+	}
+	if combined.AllowsModel(ProtocolGemini, "gemini-2.5-pro") {
+		t.Fatal("expected unmatched gemini model to be rejected")
+	}
+}
+
 func TestModelConfigParseAndDefaults(t *testing.T) {
 	t.Setenv(EnvModelDir, "/tmp/env-guard-dir")
 	cfg, err := Parse([]byte(`

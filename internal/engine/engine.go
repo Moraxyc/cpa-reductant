@@ -47,6 +47,7 @@ type StatsSnapshot struct {
 
 type PolicySummary struct {
 	Models            []string          `json:"models,omitempty"`
+	ExcludeModels     []string          `json:"exclude_models,omitempty"`
 	Protocols         []string          `json:"protocols,omitempty"`
 	Secrets           bool              `json:"secrets"`
 	Personal          bool              `json:"personal"`
@@ -503,6 +504,7 @@ func (e *Engine) StatusWithOptions(eventLimit int, actionFilter string) Status {
 		LastActivityAt:     activityStr,
 		Policy: PolicySummary{
 			Models:            append([]string(nil), cfg.Models...),
+			ExcludeModels:     append([]string(nil), cfg.ExcludeModels...),
 			Protocols:         append([]string(nil), cfg.Protocols...),
 			Secrets:           cfg.EffectiveSecrets(),
 			Personal:          cfg.EffectivePersonal(),

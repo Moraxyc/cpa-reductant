@@ -138,8 +138,9 @@ type RuleConfig struct {
 }
 
 type Config struct {
-	Models       []string          `yaml:"models"`
-	Protocols    []string          `yaml:"protocols"`
+	Models        []string          `yaml:"models"`
+	ExcludeModels []string          `yaml:"exclude_models"`
+	Protocols     []string          `yaml:"protocols"`
 	Secrets      *bool             `yaml:"secrets"`
 	Personal     *bool             `yaml:"personal"`
 	Kinds        map[string]bool   `yaml:"kinds"`
@@ -337,27 +338,75 @@ func Parse(rawYAML []byte) (*Config, error) {
 	return &cfg, nil
 }
 
+// MatchModelPattern matches a model ID against a wildcard pattern supporting
+// '*' (zero or more runes, including '/') and '?' (any single rune).
+func MatchModelPattern(pattern, model string) bool {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return false
+	}
+	if !strings.ContainsAny(pattern, "*?") {
+		return pattern == model
+	}
+	p := []rune(pattern)
+	s := []rune(model)
+	pi, si := 0, 0
+	starIdx, matchIdx := -1, 0
+	for si < len(s) {
+		if pi < len(p) && (p[pi] == '?' || p[pi] == s[si]) {
+			pi++
+			si++
+		} else if pi < len(p) && p[pi] == '*' {
+			starIdx = pi
+			matchIdx = si
+			pi++
+		} else if starIdx != -1 {
+			pi = starIdx + 1
+			matchIdx++
+			si = matchIdx
+		} else {
+			return false
+		}
+	}
+	for pi < len(p) && p[pi] == '*' {
+		pi++
+	}
+	return pi == len(p)
+}
+
+func matchesAnyModelPattern(patterns []string, model string) bool {
+	for _, pat := range patterns {
+		if MatchModelPattern(pat, model) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesAnyProtocol(protocols []string, normalized string) bool {
+	for _, allowed := range protocols {
+		if NormalizeProtocol(allowed) == normalized {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Config) AllowsModel(protocol, model string) bool {
 	normalized := NormalizeProtocol(protocol)
 	if !IsSupportedProtocol(normalized) {
 		return false
 	}
-	if c != nil && len(c.Protocols) > 0 {
-		matched := false
-		for _, allowed := range c.Protocols {
-			if NormalizeProtocol(allowed) == normalized {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return false
-		}
+	if c != nil && len(c.Protocols) > 0 && !matchesAnyProtocol(c.Protocols, normalized) {
+		return false
+	}
+	if c != nil && len(c.ExcludeModels) > 0 && matchesAnyModelPattern(c.ExcludeModels, model) {
+		return false
 	}
 	if c == nil || len(c.Models) == 0 {
 		return true
 	}
-	return slices.Contains(c.Models, model)
+	return matchesAnyModelPattern(c.Models, model)
 }
 
 func Metadata() pluginapi.Metadata {
@@ -367,7 +416,8 @@ func Metadata() pluginapi.Metadata {
 		Author:           "moraxyc",
 		GitHubRepository: "https://github.com/moraxyc/cpa-reductant",
 		ConfigFields: []pluginapi.ConfigField{
-			{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Target LLM model IDs to redact (empty: all models; unrelated to local PII model)"},
+			{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Target LLM model IDs or glob patterns (*, ?) to redact (empty: all models; unrelated to local PII model)"},
+			{Name: "exclude_models", Type: pluginapi.ConfigFieldTypeArray, Description: "LLM model IDs or glob patterns (*, ?) to skip even when matched by models"},
 			{Name: "protocols", Type: pluginapi.ConfigFieldTypeArray, Description: "Exact protocol formats (empty: all supported CPA formats)"},
 			{Name: "secrets", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Mask secrets such as API keys, private keys, tokens, and passwords (default: true)"},
 			{Name: "personal", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Mask built-in personal data categories (default: true)"},
