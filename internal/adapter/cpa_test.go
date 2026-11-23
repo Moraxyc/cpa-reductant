@@ -1750,3 +1750,27 @@ func TestInterceptorFallbackInteractionsAgentStreamAndCleanup(t *testing.T) {
 		t.Fatalf("expected error capture entry on failed request, got %+v", snap.Entries)
 	}
 }
+
+func TestLifecycleContextCancellationOnShutdown(t *testing.T) {
+	p := NewPlugin(engine.New(nil), &fakeHost{})
+	ctx := p.requestContext()
+	if ctx.Err() != nil {
+		t.Fatalf("expected active lifecycle context before shutdown, got %v", ctx.Err())
+	}
+
+	p.Shutdown()
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("expected lifecycle context to be cancelled on Shutdown")
+	}
+
+	// Re-registering resets the lifecycle context cleanly.
+	if _, err := p.Dispatch(pluginabi.MethodPluginRegister, mustJSON(t, map[string]any{})); err != nil {
+		t.Fatalf("re-register after shutdown: %v", err)
+	}
+	if err := p.requestContext().Err(); err != nil {
+		t.Fatalf("expected fresh lifecycle context after register, got %v", err)
+	}
+	p.Shutdown()
+}

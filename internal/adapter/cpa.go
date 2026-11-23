@@ -86,10 +86,13 @@ type streamUpdate struct {
 }
 
 type Plugin struct {
-	engine     *engine.Engine
-	host       HostCaller
-	sessionsMu sync.Mutex
-	sessions   map[string]*interceptSession
+	engine          *engine.Engine
+	host            HostCaller
+	sessionsMu      sync.Mutex
+	sessions        map[string]*interceptSession
+	lifecycleMu     sync.RWMutex
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
 }
 
 type interceptSession struct {
@@ -115,10 +118,13 @@ type interceptSession struct {
 }
 
 func NewPlugin(eng *engine.Engine, host HostCaller) *Plugin {
+	ctx, cancel := context.WithCancel(context.Background())
 	p := &Plugin{
-		engine:   eng,
-		host:     host,
-		sessions: make(map[string]*interceptSession),
+		engine:          eng,
+		host:            host,
+		sessions:        make(map[string]*interceptSession),
+		lifecycleCtx:    ctx,
+		lifecycleCancel: cancel,
 	}
 	if eng != nil && host != nil {
 		eng.SetLogger(func(level, callbackID, msg string, fields map[string]any) {
@@ -138,9 +144,40 @@ func NewPlugin(eng *engine.Engine, host HostCaller) *Plugin {
 	return p
 }
 
+func (p *Plugin) requestContext() context.Context {
+	if p == nil {
+		return context.Background()
+	}
+	p.lifecycleMu.RLock()
+	ctx := p.lifecycleCtx
+	p.lifecycleMu.RUnlock()
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+func (p *Plugin) ensureLifecycleContext() {
+	if p == nil {
+		return
+	}
+	p.lifecycleMu.Lock()
+	if p.lifecycleCtx == nil || p.lifecycleCtx.Err() != nil {
+		p.lifecycleCtx, p.lifecycleCancel = context.WithCancel(context.Background())
+	}
+	p.lifecycleMu.Unlock()
+}
+
 func (p *Plugin) Shutdown() {
 	if p == nil {
 		return
+	}
+	p.lifecycleMu.Lock()
+	cancel := p.lifecycleCancel
+	p.lifecycleCancel = nil
+	p.lifecycleMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 	p.sessionsMu.Lock()
 	clear(p.sessions)
@@ -153,6 +190,7 @@ func (p *Plugin) Shutdown() {
 func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+		p.ensureLifecycleContext()
 		var request struct {
 			Config []byte `json:"config_yaml"`
 		}
@@ -381,7 +419,7 @@ func (p *Plugin) handleManagement(req pluginapi.ManagementRequest) pluginapi.Man
 		if err := json.Unmarshal(req.Body, &body); err != nil {
 			return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		}
-		res, err := p.engine.PreviewWithOptions(context.Background(), body)
+		res, err := p.engine.PreviewWithOptions(p.requestContext(), body)
 		if err != nil {
 			if errors.Is(err, engine.ErrInvalidPreviewRequest) {
 				return jsonManagementResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -603,7 +641,7 @@ func (p *Plugin) handleRequestInterceptBefore(req requestInterceptRequest) plugi
 	}
 	callerScope, _ := req.Metadata[pluginapi.CallerScopeMetadataKey].(string)
 	captureID := p.engine.BeginCapture()
-	masked, err := p.engine.MaskRequest(context.Background(), engine.RequestMeta{
+	masked, err := p.engine.MaskRequest(p.requestContext(), engine.RequestMeta{
 		Route:          model,
 		Protocol:       protocol,
 		Model:          model,
@@ -831,7 +869,7 @@ func (p *Plugin) prepareModelRequest(request executorRequest, stream bool) (mode
 	}
 	callerScope, _ := request.Metadata[pluginapi.CallerScopeMetadataKey].(string)
 	captureID := p.engine.BeginCapture()
-	masked, err := p.engine.MaskRequest(context.Background(), engine.RequestMeta{
+	masked, err := p.engine.MaskRequest(p.requestContext(), engine.RequestMeta{
 		Route:          request.Model,
 		Protocol:       entryProtocol,
 		Model:          request.Model,
