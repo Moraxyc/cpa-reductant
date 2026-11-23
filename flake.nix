@@ -16,7 +16,7 @@
       inputs.nixpkgs-lib.follows = "nixpkgs";
     };
     magpie = {
-      url = "github:yetone/magpie/v0.1.4657";
+      url = "github:yetone/magpie/v0.1.4711";
       flake = false;
     };
   };
