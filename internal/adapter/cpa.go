@@ -312,7 +312,7 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 				{
 					Path:        resourceUIPath,
 					Menu:        config.PluginID,
-					Description: "状态监控与脱敏预览",
+					Description: "Observability dashboard and redaction preview",
 				},
 			},
 		}, nil
@@ -339,7 +339,7 @@ func (p *Plugin) handleManagement(req pluginapi.ManagementRequest) pluginapi.Man
 		method = http.MethodGet
 	}
 	if method == http.MethodGet && isResourceUIPath(req.Path) {
-		return renderPortalHTML()
+		return renderPortalHTML(resolveLocale(req))
 	}
 	path := normalizeManagementPath(req.Path)
 	switch {

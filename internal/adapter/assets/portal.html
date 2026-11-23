@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="__INITIAL_LANG__">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>cpa-reductant 状态监控</title>
+<title>cpa-reductant Status Dashboard</title>
 <style>
 /*__DASHBOARD_CSS__*/
 .auth-wrap{max-width:460px;margin:48px auto}
@@ -17,16 +17,19 @@ body.embedded .auth-wrap{margin-top:12px}
 </head>
 <body>
 <div id="auth-card" class="card auth-wrap">
-  <div class="title-row">
-    <h1>cpa-reductant</h1>
-    <span class="badge badge-amber"><span class="dot"></span>需要登录</span>
+  <div class="header">
+    <div class="title-row">
+      <h1>cpa-reductant</h1>
+      <span class="badge badge-amber"><span class="dot"></span><span data-i18n="auth.badge"></span></span>
+    </div>
+    <select class="select lang-select" data-i18n-title="lang.label" data-i18n-aria="lang.label"></select>
   </div>
   <div class="sub" style="margin-top:8px">
-    请输入 CPA 管理密钥（<span class="mono">management.secret-key</span>）查看监控看板。密钥仅保存在当前标签页。
+    <span data-i18n="auth.instructions"></span> <span data-i18n="auth.storage_notice"></span>
   </div>
   <form id="auth-form" class="auth-form">
-    <input id="secret-input" class="input" type="password" autocomplete="current-password" placeholder="输入 management.secret-key" required>
-    <button id="auth-submit" class="btn active" type="submit">进入看板</button>
+    <input id="secret-input" class="input" type="password" autocomplete="current-password" data-i18n-placeholder="auth.placeholder" required>
+    <button id="auth-submit" class="btn active" type="submit" data-i18n="auth.submit"></button>
   </form>
   <div id="auth-err" class="err-box hidden"></div>
 </div>
@@ -43,10 +46,11 @@ body.embedded .auth-wrap{margin-top:12px}
         <div id="time-sub" class="sub" style="margin-top:4px"></div>
       </div>
       <div class="actions">
-        <button id="auto-refresh-btn" class="btn" type="button" onclick="toggleAutoRefresh()">5s 自动刷新</button>
-        <button class="btn" type="button" onclick="loadStatus()">刷新</button>
+        <button id="auto-refresh-btn" class="btn" type="button" onclick="toggleAutoRefresh()"></button>
+        <button class="btn" type="button" onclick="loadStatus()" data-i18n="header.refresh"></button>
         <button class="btn" type="button" onclick="openJSON()">JSON</button>
-        <button class="btn" type="button" onclick="disconnectKey()">退出登录</button>
+        <button class="btn" type="button" onclick="disconnectKey()" data-i18n="auth.sign_out"></button>
+        <select class="select lang-select" data-i18n-title="lang.label" data-i18n-aria="lang.label"></select>
       </div>
     </div>
     <div id="policy-chips" class="chips"></div>
@@ -57,11 +61,11 @@ body.embedded .auth-wrap{margin-top:12px}
     <div class="card-head">
       <button class="fold-btn" type="button" aria-expanded="true">
         <span class="fold-arrow" aria-hidden="true"></span>
-        <span class="fold-label">本地 PII 模型 <span class="sub">用于识别人名、地址、电话等语义实体（独立于顶层 models 白名单）</span></span>
+        <span class="fold-label"><span data-i18n="model.title"></span> <span class="sub" data-i18n="model.description_portal"></span></span>
       </button>
       <span class="actions">
-        <span id="model-status-badge" class="badge badge-muted">加载中</span>
-        <button id="model-download-btn" class="btn hidden" type="button" onclick="downloadModelWeights()">立即下载权重</button>
+        <span id="model-status-badge" class="badge badge-muted" data-i18n="common.loading"></span>
+        <button id="model-download-btn" class="btn hidden" type="button" onclick="downloadModelWeights()" data-i18n="model.download"></button>
       </span>
     </div>
     <div class="card-body">
@@ -69,7 +73,7 @@ body.embedded .auth-wrap{margin-top:12px}
     <div id="model-progress" class="hidden" style="margin-top:10px"></div>
     <div id="model-notice"></div>
     <details id="model-guide" class="guide-box">
-      <summary>配置与默认目录说明（点击展开）</summary>
+      <summary data-i18n="model.guide.title"></summary>
       <div id="model-guide-body"></div>
     </details>
     </div>
@@ -82,7 +86,7 @@ body.embedded .auth-wrap{margin-top:12px}
       <div class="card-head">
         <button class="fold-btn" type="button" aria-expanded="true">
           <span class="fold-arrow" aria-hidden="true"></span>
-          <span class="fold-label">命中类别 <span class="sub">按脱敏类型</span></span>
+          <span class="fold-label"><span data-i18n="kind.title"></span> <span class="sub" data-i18n="kind.description"></span></span>
         </button>
       </div>
       <div class="card-body">
@@ -93,7 +97,7 @@ body.embedded .auth-wrap{margin-top:12px}
       <div class="card-head">
         <button class="fold-btn" type="button" aria-expanded="true">
           <span class="fold-arrow" aria-hidden="true"></span>
-          <span class="fold-label">检出方式 <span class="sub">按识别来源</span></span>
+          <span class="fold-label"><span data-i18n="finder.title"></span> <span class="sub" data-i18n="finder.description"></span></span>
         </button>
       </div>
       <div class="card-body">
@@ -107,7 +111,7 @@ body.embedded .auth-wrap{margin-top:12px}
       <div class="card-head">
         <button class="fold-btn" type="button" aria-expanded="true">
           <span class="fold-arrow" aria-hidden="true"></span>
-          <span class="fold-label">协议统计</span>
+          <span class="fold-label" data-i18n="table.protocol_title"></span>
         </button>
       </div>
       <div class="card-body">
@@ -118,7 +122,7 @@ body.embedded .auth-wrap{margin-top:12px}
       <div class="card-head">
         <button class="fold-btn" type="button" aria-expanded="true">
           <span class="fold-arrow" aria-hidden="true"></span>
-          <span class="fold-label">模型统计</span>
+          <span class="fold-label" data-i18n="table.model_title"></span>
         </button>
       </div>
       <div class="card-body">
@@ -131,7 +135,7 @@ body.embedded .auth-wrap{margin-top:12px}
     <div class="card-head">
       <button class="fold-btn" type="button" aria-expanded="true">
         <span class="fold-arrow" aria-hidden="true"></span>
-        <span class="fold-label">最近过滤记录 <span class="sub">仅保留前缀提示与占位符，不保存明文<span id="events-count"></span></span></span>
+        <span class="fold-label"><span data-i18n="events.title"></span> <span class="sub"><span data-i18n="events.privacy_notice"></span><span id="events-count"></span></span></span>
       </button>
       <span id="event-filters" class="actions"></span>
     </div>
@@ -144,25 +148,25 @@ body.embedded .auth-wrap{margin-top:12px}
     <div class="card-head">
       <button class="fold-btn" type="button" aria-expanded="true">
         <span class="fold-arrow" aria-hidden="true"></span>
-        <span class="fold-label">调试抓包 <span class="sub">临时内存开关（支持 TTL 自动关闭），对比原始请求、脱敏报文与响应还原</span></span>
+        <span class="fold-label"><span data-i18n="capture.title"></span> <span class="sub" data-i18n="capture.description"></span></span>
       </button>
       <span class="actions">
-        <span id="cap-badge" class="badge badge-muted">已关闭</span>
-        <select id="cap-ttl" class="select" title="抓包有效期">
-          <option value="60">1 分钟</option>
-          <option value="300" selected>5 分钟</option>
-          <option value="900">15 分钟</option>
-          <option value="1800">30 分钟</option>
+        <span id="cap-badge" class="badge badge-muted" data-i18n="capture.disabled"></span>
+        <select id="cap-ttl" class="select" data-i18n-title="capture.ttl" data-i18n-aria="capture.ttl">
+          <option value="60"></option>
+          <option value="300" selected></option>
+          <option value="900"></option>
+          <option value="1800"></option>
         </select>
-        <button id="cap-toggle-btn" class="btn" type="button" onclick="toggleCapture()">开启抓包</button>
-        <button class="btn" type="button" onclick="loadCapture(true)">刷新抓包</button>
-        <button class="btn" type="button" onclick="clearCapture()">清空记录</button>
+        <button id="cap-toggle-btn" class="btn" type="button" onclick="toggleCapture()" data-i18n="capture.start"></button>
+        <button class="btn" type="button" onclick="loadCapture(true)" data-i18n="capture.refresh"></button>
+        <button class="btn" type="button" onclick="clearCapture()" data-i18n="capture.clear"></button>
       </span>
     </div>
     <div class="card-body">
-      <div class="sub">支持 <span class="mono">curl</span> 调用：<span class="mono">/v0/management/cpa-reductant/debug/capture</span>（GET 查看 / POST 开关 / DELETE 清空）</div>
+      <div class="sub" data-i18n="capture.curl_usage"></div>
       <div id="cap-err" class="err-box hidden"></div>
-      <div id="cap-list" class="cap-list"><div class="empty">抓包未开启</div></div>
+      <div id="cap-list" class="cap-list"><div class="empty" data-i18n="capture.not_started"></div></div>
     </div>
   </div>
 
@@ -170,13 +174,13 @@ body.embedded .auth-wrap{margin-top:12px}
     <div class="card-head">
       <button class="fold-btn" type="button" aria-expanded="true">
         <span class="fold-arrow" aria-hidden="true"></span>
-        <span class="fold-label">脱敏预览 <span class="sub">只读测试，不计入统计或还原映射</span></span>
+        <span class="fold-label"><span data-i18n="preview.title"></span> <span class="sub" data-i18n="preview.description"></span></span>
       </button>
     </div>
     <div class="card-body">
-      <textarea id="preview-input" placeholder="输入测试文本（例如：Authorization: Bearer sk-ant-api03-example1234567890, contact alice@example.com）"></textarea>
+      <textarea id="preview-input" data-i18n-placeholder="preview.placeholder"></textarea>
       <div class="actions" style="margin-top:8px">
-        <button class="btn" type="button" onclick="runPreview()">测试</button>
+        <button class="btn" type="button" onclick="runPreview()" data-i18n="preview.test"></button>
         <span id="preview-meta" class="sub"></span>
       </div>
       <div id="preview-out" class="preview-out"></div>
@@ -198,15 +202,23 @@ body.embedded .auth-wrap{margin-top:12px}
   var PREVIEW_URL = '/v0/management/cpa-reductant/preview';
   var DEBUG_CAPTURE_URL = '/v0/management/cpa-reductant/debug/capture';
   var MODEL_DOWNLOAD_URL = '/v0/management/cpa-reductant/model/download';
-  var FINDER_META = {rule:'内置规则',yours:'自定义规则',word:'词表',model:'本地模型',known:'关联匹配'};
-  var ACTION_FILTERS = [['','全部'],['mask','脱敏'],['warn','告警'],['block','拦截'],['restore','还原'],['passthrough','放行'],['error','错误']];
+  var LANG_STORAGE = '__LANG_COOKIE__';
+  var I18N_BUNDLE = /*__I18N_BUNDLE__*/;
+  var I18N_LOCALES = /*__I18N_LOCALES__*/;
+  var FINDER_META = {rule:'finder.rule',yours:'finder.yours',word:'finder.word',model:'finder.model',known:'finder.known'};
+  var ACTION_FILTERS = ['', 'mask', 'warn', 'block', 'restore', 'passthrough', 'error'];
 
   var state = {
     key: '',
+    lang: resolveLang(),
     actionFilter: '',
     autoTimer: null,
     dlPollTimer: null,
     lastStatus: null,
+    lastCapture: null,
+    lastPreview: null,
+    previewPending: false,
+    errors: {},
     captureEnabled: false,
     openCaptures: {},
     modelGuideInit: false
@@ -219,6 +231,89 @@ body.embedded .auth-wrap{margin-top:12px}
       .replace(/>/g,'&gt;')
       .replace(/"/g,'&quot;')
       .replace(/'/g,'&#39;');
+  }
+
+  function normalizeLang(raw){
+    var code = String(raw || '').trim().toLowerCase();
+    if(code.startsWith('zh')) return 'zh-CN';
+    if(code.startsWith('en')) return 'en';
+    return '';
+  }
+
+  function resolveLang(){
+    var query = normalizeLang(new URLSearchParams(window.location.search).get('lang'));
+    if(query) return query;
+    try{
+      var stored = normalizeLang(localStorage.getItem(LANG_STORAGE));
+      if(stored) return stored;
+    }catch(_){}
+    var cookie = document.cookie.split(';').map(function(entry){ return entry.trim(); })
+      .find(function(entry){ return entry.startsWith(LANG_STORAGE + '='); });
+    return normalizeLang(cookie && cookie.slice(LANG_STORAGE.length + 1)) ||
+      (navigator.languages || []).concat(navigator.language).map(normalizeLang).find(Boolean) ||
+      normalizeLang(document.documentElement.lang) || 'en';
+  }
+
+  function t(key, vars){
+    var msg = I18N_BUNDLE[state.lang]?.[key] ?? I18N_BUNDLE.en[key] ?? key;
+    return vars ? msg.replace(/\{(\w+)\}/g, function(match, name){ return vars[name] ?? match; }) : msg;
+  }
+
+  function textHTML(key, vars){
+    return esc(t(key, vars));
+  }
+
+  function monoText(key, vars){
+    return esc(t(key)).replace(/\{(\w+)\}/g, function(_, name){
+      return '<span class="mono">' + esc(vars[name]) + '</span>';
+    });
+  }
+
+  function applyStaticI18n(){
+    document.documentElement.lang = state.lang;
+    document.title = t('page.title');
+    document.querySelectorAll('.lang-select').forEach(function(select){ select.value = state.lang; });
+    var rich = {
+      'auth.instructions': {setting: 'management.secret-key'},
+      'capture.curl_usage': {curl: 'curl', endpoint: DEBUG_CAPTURE_URL}
+    };
+    document.querySelectorAll('[data-i18n]').forEach(function(el){
+      var key = el.dataset.i18n;
+      if(rich[key]) el.innerHTML = monoText(key, rich[key]);
+      else el.textContent = t(key);
+    });
+    [['placeholder', 'placeholder'], ['title', 'title'], ['aria', 'aria-label']].forEach(function(pair){
+      var attr = 'data-i18n-' + pair[0];
+      document.querySelectorAll('[' + attr + ']').forEach(function(el){ el.setAttribute(pair[1], t(el.getAttribute(attr))); });
+    });
+    document.querySelectorAll('#cap-ttl option').forEach(function(option){
+      option.textContent = t('capture.ttl_minutes', {count: Number(option.value) / 60});
+    });
+    renderAutoRefresh();
+    renderPreviewMeta();
+  }
+
+  function setLang(code){
+    var lang = normalizeLang(code);
+    if(!lang) return;
+    state.lang = lang;
+    try{ localStorage.setItem(LANG_STORAGE, lang); }catch(_){}
+    document.cookie = LANG_STORAGE + '=' + encodeURIComponent(lang) + '; path=/; max-age=31536000; SameSite=Lax';
+    applyStaticI18n();
+    if(state.key){
+      if(state.lastStatus) renderStatus(state.lastStatus);
+      if(state.lastCapture) renderCapture(state.lastCapture);
+      if(state.lastPreview) renderPreview(state.lastPreview);
+    }
+    Object.keys(state.errors).forEach(renderError);
+  }
+
+  function initLanguage(){
+    document.querySelectorAll('.lang-select').forEach(function(select){
+      I18N_LOCALES.forEach(function(locale){ select.add(new Option(locale.label, locale.code)); });
+      select.onchange = function(){ setLang(select.value); };
+    });
+    applyStaticI18n();
   }
 
   function fmtMS(v){
@@ -262,23 +357,23 @@ body.embedded .auth-wrap{margin-top:12px}
 
   function phaseLabel(p){
     switch(String(p || '').toLowerCase()){
-      case 'request': return '请求';
-      case 'response': return '响应';
-      case 'stream': return '流式';
-      case 'model': return '模型';
+      case 'request': return t('phase.request');
+      case 'response': return t('phase.response');
+      case 'stream': return t('phase.stream');
+      case 'model': return t('phase.model');
       default: return p || '';
     }
   }
 
   function actionLabel(a){
     switch(String(a || '').toLowerCase()){
-      case 'block': return '拦截';
-      case 'warn': return '告警';
-      case 'mask': return '脱敏';
-      case 'restore': return '还原';
-      case 'passthrough': return '放行';
-      case 'error': return '错误';
-      case 'degraded': return '降级';
+      case 'block': return t('action.block');
+      case 'warn': return t('action.warn');
+      case 'mask': return t('action.mask');
+      case 'restore': return t('action.restore');
+      case 'passthrough': return t('action.passthrough');
+      case 'error': return t('action.error');
+      case 'degraded': return t('action.degraded');
       default: return a || '';
     }
   }
@@ -297,30 +392,41 @@ body.embedded .auth-wrap{margin-top:12px}
     var m = st.model || {};
     var s = st.stats || {};
     if(m.enabled){
-      if(m.last_error || m.download_error) return ['模型异常（规则兜底）','badge-red'];
-      if(m.downloading) return ['模型下载中','badge-amber'];
-      if(m.behind) return ['模型繁忙（超时降级）','badge-amber'];
-      if(!m.installed) return [m.strict ? '缺失权重（strict 将拒载）' : '缺失权重（仅规则运行）','badge-amber'];
+      if(m.last_error || m.download_error) return [t('health.model_error'),'badge-red'];
+      if(m.downloading) return [t('health.model_downloading'),'badge-amber'];
+      if(m.behind) return [t('health.model_busy'),'badge-amber'];
+      if(!m.installed) return [m.strict ? t('health.weights_missing_strict') : t('health.weights_missing_fallback'),'badge-amber'];
     }
-    if((s.requests_total || 0) > 0) return ['运行中','badge-green'];
-    return ['空闲','badge-blue'];
+    if((s.requests_total || 0) > 0) return [t('health.running'),'badge-green'];
+    return [t('health.idle'),'badge-blue'];
   }
 
-  function showAuth(msg){
+  function renderError(id){
+    var el = document.getElementById(id);
+    var error = state.errors[id];
+    var msg = error ? t(error.key, error.vars) : '';
+    if(el.classList.contains('err-box')){
+      el.textContent = msg;
+      el.classList.toggle('hidden', !error);
+    } else {
+      el.innerHTML = error ? '<div class="err-box">' + esc(msg) + '</div>' : '';
+    }
+  }
+
+  function setError(id, key, vars){
+    if(key) state.errors[id] = {key: key, vars: vars};
+    else delete state.errors[id];
+    renderError(id);
+  }
+
+  function showAuth(key, vars){
     stopAutoRefresh();
     stopDownloadPoll();
     state.key = '';
     try{ sessionStorage.removeItem(KEY_STORAGE); }catch(_){}
     document.getElementById('app').classList.add('hidden');
     document.getElementById('auth-card').classList.remove('hidden');
-    var errEl = document.getElementById('auth-err');
-    if(msg){
-      errEl.textContent = msg;
-      errEl.classList.remove('hidden');
-    } else {
-      errEl.textContent = '';
-      errEl.classList.add('hidden');
-    }
+    setError('auth-err', key, vars);
   }
 
   function showApp(){
@@ -328,38 +434,42 @@ body.embedded .auth-wrap{margin-top:12px}
     document.getElementById('app').classList.remove('hidden');
   }
 
-  function renderBars(elId, counts, metaMap, green){
+  function tableHead(keys){
+    return '<table><thead><tr>' + keys.map(function(key){ return '<th>' + textHTML(key) + '</th>'; }).join('') + '</tr></thead><tbody>';
+  }
+
+  function renderBars(elId, counts, emptyKey, metaMap){
     var el = document.getElementById(elId);
     var entries = Object.entries(counts || {}).filter(function(kv){ return kv[1] > 0; });
     if(!entries.length){
-      el.innerHTML = '<div class="empty">暂无记录</div>';
+      el.innerHTML = '<div class="empty">' + textHTML(emptyKey) + '</div>';
       return;
     }
     var total = entries.reduce(function(acc, kv){ return acc + kv[1]; }, 0);
     entries.sort(function(a, b){ return b[1] === a[1] ? (a[0] < b[0] ? -1 : 1) : b[1] - a[1]; });
     el.innerHTML = '<div class="bar-list">' + entries.map(function(kv){
       var pct = ((kv[1] * 100) / total).toFixed(1);
-      var meta = metaMap && metaMap[kv[0]] ? ' <span class="sub">' + esc(metaMap[kv[0]]) + '</span>' : '';
+      var meta = metaMap && metaMap[kv[0]] ? ' <span class="sub">' + textHTML(metaMap[kv[0]]) + '</span>' : '';
       return '<div class="bar-row">' +
         '<div class="bar-head"><span class="mono"><strong>' + esc(kv[0]) + '</strong>' + meta + '</span>' +
         '<span class="mono">' + kv[1] + ' (' + pct + '%)</span></div>' +
-        '<div class="bar-track"><div class="bar-fill' + (green ? ' green' : '') + '" style="width:' + pct + '%"></div></div>' +
+        '<div class="bar-track"><div class="bar-fill' + (metaMap ? ' green' : '') + '" style="width:' + pct + '%"></div></div>' +
       '</div>';
     }).join('') + '</div>';
   }
 
-  function renderDimTable(elId, dims, label, emptyMsg){
+  function renderDimTable(elId, dims, label, emptyKey){
     var el = document.getElementById(elId);
     var entries = Object.entries(dims || {});
     if(!entries.length){
-      el.innerHTML = '<div class="empty">' + esc(emptyMsg) + '</div>';
+      el.innerHTML = '<div class="empty">' + textHTML(emptyKey) + '</div>';
       return;
     }
     entries.sort(function(a, b){
       var ra = a[1].requests || 0, rb = b[1].requests || 0;
       return rb === ra ? (a[0] < b[0] ? -1 : 1) : rb - ra;
     });
-    el.innerHTML = '<table><thead><tr><th>' + esc(label) + '</th><th>请求</th><th>脱敏 / 拦截</th><th>命中</th><th>还原</th><th>入站</th></tr></thead><tbody>' +
+    el.innerHTML = tableHead([label, 'table.requests', 'table.masked_blocked', 'table.hits', 'table.restored', 'table.inbound']) +
       entries.map(function(kv){
         var d = kv[1] || {};
         return '<tr>' +
@@ -381,35 +491,39 @@ body.embedded .auth-wrap{margin-top:12px}
     hb.innerHTML = '<span class="dot"></span>' + esc(health[0]);
     document.getElementById('version-badge').textContent = 'v' + (st.version || '');
 
-    var tsHtml = '启动 <span class="mono">' + esc(st.started_at) + '</span> · 已运行 <span class="mono">' + esc(fmtDuration(st.uptime_seconds)) + '</span>';
-    tsHtml += st.last_activity_at ? ' · 最近请求 <span class="mono">' + esc(st.last_activity_at) + '</span>' : ' · 暂无请求';
-    if(st.last_reconfigured_at) tsHtml += ' · 最近重载 <span class="mono">' + esc(st.last_reconfigured_at) + '</span>';
-    document.getElementById('time-sub').innerHTML = tsHtml;
+    var tsHtml = [
+      monoText('header.started_at', {time: st.started_at}),
+      monoText('header.uptime', {duration: fmtDuration(st.uptime_seconds)}),
+      st.last_activity_at ? monoText('header.last_request', {time: st.last_activity_at}) : textHTML('header.no_requests')
+    ];
+    if(st.last_reconfigured_at) tsHtml.push(monoText('header.last_reload', {time: st.last_reconfigured_at}));
+    document.getElementById('time-sub').innerHTML = tsHtml.join(' · ');
 
     var p = st.policy || {};
     var m = st.model || {};
     var dlPct = m.download_total > 0 ? Math.round((m.download_done || 0) * 100 / m.download_total) : 0;
-    var keyStatus = !p.key_path_configured ? '临时（仅内存）' : (p.key_path_active ? '已持久化' : '异常');
-    var modelStatus = !m.enabled ? '未启用' :
-      m.loaded ? (esc(m.name) + ' · 已加载 (' + (m.cores || 0) + ' 核)') :
-      m.downloading ? (esc(m.name) + ' · 下载中 (' + dlPct + '%)') :
-      m.installed ? (esc(m.name) + ' · 就绪') : (esc(m.name) + ' · 缺失');
+    var keyStatus = !p.key_path_configured ? t('policy.key_temporary') : t(p.key_path_active ? 'policy.key_persisted' : 'policy.key_failed');
+    var modelStatus = !m.enabled ? t('model.disabled') : (m.name || '') + ' · ' + (
+      m.loaded ? t('model.loaded', {count: m.cores || 0}) :
+      m.downloading ? t('model.downloading', {percent: dlPct}) :
+      t(m.installed ? 'model.ready' : 'model.missing')
+    );
     document.getElementById('policy-chips').innerHTML = [
-      '<strong>密钥脱敏:</strong> ' + (p.secrets ? '开' : '关'),
-      '<strong>个人隐私:</strong> ' + (p.personal ? '开' : '关'),
-      '<strong>词表:</strong> ' + (p.words_count || 0),
-      '<strong>规则:</strong> ' + (p.rules_count || 0),
-      '<strong>白名单:</strong> ' + (p.allow_count || 0),
-      '<strong>替换形式:</strong> ' + (p.shape ? '保形替换' : '占位符'),
-      '<strong>HMAC 密钥:</strong> ' + keyStatus,
-      '<strong>PII 模型:</strong> ' + modelStatus
-    ].map(function(c){ return '<span class="chip">' + c + '</span>'; }).join('');
+      ['policy.secrets', t(p.secrets ? 'policy.on' : 'policy.off')],
+      ['policy.personal', t(p.personal ? 'policy.on' : 'policy.off')],
+      ['policy.words', p.words_count || 0],
+      ['policy.rules', p.rules_count || 0],
+      ['policy.allowlist', p.allow_count || 0],
+      ['policy.replacement', t(p.shape ? 'policy.shape_preserving' : 'policy.placeholder')],
+      ['policy.hmac_key', keyStatus],
+      ['policy.model', modelStatus]
+    ].map(function(c){ return '<span class="chip"><strong>' + textHTML(c[0]) + ':</strong> ' + esc(c[1]) + '</span>'; }).join('');
 
     var errs = [];
-    if(p.key_path_error) errs.push('HMAC 密钥异常: ' + p.key_path_error);
-    if(m.last_error) errs.push('模型错误: ' + m.last_error + (m.retry_at ? '（退避至 ' + m.retry_at + '）' : ''));
-    if(m.download_error) errs.push('模型下载失败: ' + m.download_error);
-    if(m.disk_cache_error) errs.push('磁盘缓存写入失败: ' + m.disk_cache_error);
+    if(p.key_path_error) errs.push(t('policy.key_error', {error: p.key_path_error}));
+    if(m.last_error) errs.push(t('model.error', {error: m.last_error}) + (m.retry_at ? t('model.retry_at', {time: m.retry_at}) : ''));
+    if(m.download_error) errs.push(t('model.download_error', {error: m.download_error}));
+    if(m.disk_cache_error) errs.push(t('model.disk_cache_error', {error: m.disk_cache_error}));
     document.getElementById('runtime-errors').innerHTML = errs.map(function(e){
       return '<div class="err-box">' + esc(e) + '</div>';
     }).join('');
@@ -420,39 +534,42 @@ body.embedded .auth-wrap{margin-top:12px}
     var ml = s.mask_latency_ms || {};
     var rl = s.restore_latency_ms || {};
     var il = m.infer_latency_ms || {};
+    var restoredCount = textHTML('kpi.restored_count').split('{count}');
+    var restoredKpi = '<span class="sub">' + restoredCount[0] + '</span>' + esc(s.placeholders_restored || 0) + '<span class="sub">' + restoredCount[1] + '</span>';
+    var cacheKpi = textHTML('kpi.cache_entries').replace('{count}', function(){ return '<strong>' + esc(m.cache_entries || 0) + '</strong>'; });
     document.getElementById('kpi-grid').innerHTML =
-      '<div class="card"><div class="kpi-label">请求处理</div><div class="kpi-val">' + (s.requests_total || 0) + '</div>' +
-      '<div class="kpi-meta"><span>脱敏 <strong>' + (s.requests_masked || 0) + '</strong> (' + pctString(s.requests_masked || 0, s.requests_total || 0) + ')</span>' +
-      '<span>拦截 <strong>' + (s.requests_blocked || 0) + '</strong> (' + pctString(s.requests_blocked || 0, s.requests_total || 0) + ')</span>' +
-      '<span>告警 <strong>' + (s.requests_warned || 0) + '</strong></span></div>' +
-      '<div class="kpi-meta"><span>平均 <strong>' + fmtMS(ml.avg_ms) + '</strong></span><span>P95 <strong>' + fmtMS(ml.p95_ms) + '</strong></span></div></div>' +
+      '<div class="card"><div class="kpi-label">' + textHTML('kpi.requests') + '</div><div class="kpi-val">' + (s.requests_total || 0) + '</div>' +
+      '<div class="kpi-meta"><span>' + textHTML('kpi.masked') + ' <strong>' + (s.requests_masked || 0) + '</strong> (' + pctString(s.requests_masked || 0, s.requests_total || 0) + ')</span>' +
+      '<span>' + textHTML('kpi.blocked') + ' <strong>' + (s.requests_blocked || 0) + '</strong> (' + pctString(s.requests_blocked || 0, s.requests_total || 0) + ')</span>' +
+      '<span>' + textHTML('kpi.warned') + ' <strong>' + (s.requests_warned || 0) + '</strong></span></div>' +
+      '<div class="kpi-meta"><span>' + textHTML('kpi.average') + ' <strong>' + fmtMS(ml.avg_ms) + '</strong></span><span>P95 <strong>' + fmtMS(ml.p95_ms) + '</strong></span></div></div>' +
 
-      '<div class="card"><div class="kpi-label">敏感命中</div><div class="kpi-val">' + (s.hits_total || 0) + '</div>' +
-      '<div class="kpi-meta"><span>脱敏替换 <strong>' + (s.hits_masked || 0) + '</strong></span>' +
-      '<span>告警放行 <strong>' + (s.hits_warned || 0) + '</strong></span>' +
-      '<span>拒绝拦截 <strong>' + (s.hits_blocked || 0) + '</strong></span></div></div>' +
+      '<div class="card"><div class="kpi-label">' + textHTML('kpi.hits') + '</div><div class="kpi-val">' + (s.hits_total || 0) + '</div>' +
+      '<div class="kpi-meta"><span>' + textHTML('kpi.hits_masked') + ' <strong>' + (s.hits_masked || 0) + '</strong></span>' +
+      '<span>' + textHTML('kpi.hits_warned') + ' <strong>' + (s.hits_warned || 0) + '</strong></span>' +
+      '<span>' + textHTML('kpi.hits_blocked') + ' <strong>' + (s.hits_blocked || 0) + '</strong></span></div></div>' +
 
-      '<div class="card"><div class="kpi-label">响应还原</div><div class="kpi-val">' + (s.placeholders_restored || 0) + ' <span class="sub">次</span></div>' +
+      '<div class="card"><div class="kpi-label">' + textHTML('kpi.restore') + '</div><div class="kpi-val">' + restoredKpi + '</div>' +
       '<div class="kpi-meta"><span>JSON <strong>' + (s.responses_restored || 0) + '/' + (s.responses_total || 0) + '</strong></span>' +
-      '<span>SSE 流 <strong>' + (s.streams_restored || 0) + '/' + (s.streams_total || 0) + '</strong></span>' +
-      ((s.streams_failed || 0) > 0 ? '<span style="color:var(--red)">流失败 <strong>' + s.streams_failed + '</strong></span>' : '') + '</div>' +
-      '<div class="kpi-meta"><span>平均 <strong>' + fmtMS(rl.avg_ms) + '</strong></span><span>P95 <strong>' + fmtMS(rl.p95_ms) + '</strong></span></div></div>' +
+      '<span>' + textHTML('kpi.streams') + ' <strong>' + (s.streams_restored || 0) + '/' + (s.streams_total || 0) + '</strong></span>' +
+      ((s.streams_failed || 0) > 0 ? '<span style="color:var(--red)">' + textHTML('kpi.streams_failed') + ' <strong>' + s.streams_failed + '</strong></span>' : '') + '</div>' +
+      '<div class="kpi-meta"><span>' + textHTML('kpi.average') + ' <strong>' + fmtMS(rl.avg_ms) + '</strong></span><span>P95 <strong>' + fmtMS(rl.p95_ms) + '</strong></span></div></div>' +
 
-      '<div class="card"><div class="kpi-label">流量与缓存</div><div class="kpi-val">' + fmtBytes(s.bytes_masked_in || 0) + ' <span class="sub">入站</span></div>' +
-      '<div class="kpi-meta"><span>出站 <strong>' + fmtBytes(s.bytes_restored_out || 0) + '</strong></span>' +
-      '<span>缓存 <strong>' + (m.cache_entries || 0) + '</strong> 条</span>' +
-      '<span>命中率 <strong>' + pctString(m.cache_hits || 0, (m.cache_hits || 0) + (m.cache_misses || 0)) + '</strong></span></div>' +
-      (m.enabled ? '<div class="kpi-meta"><span>推理平均 <strong>' + fmtMS(il.avg_ms) + '</strong></span><span>降级 <strong>' + (m.partial_timeouts || 0) + '</strong></span><span>排队 <strong>' + (m.waiting || 0) + '</strong></span></div>' : '') +
+      '<div class="card"><div class="kpi-label">' + textHTML('kpi.traffic_cache') + '</div><div class="kpi-val">' + fmtBytes(s.bytes_masked_in || 0) + ' <span class="sub">' + textHTML('kpi.inbound') + '</span></div>' +
+      '<div class="kpi-meta"><span>' + textHTML('kpi.outbound') + ' <strong>' + fmtBytes(s.bytes_restored_out || 0) + '</strong></span>' +
+      '<span>' + cacheKpi + '</span>' +
+      '<span>' + textHTML('kpi.cache_hit_rate') + ' <strong>' + pctString(m.cache_hits || 0, (m.cache_hits || 0) + (m.cache_misses || 0)) + '</strong></span></div>' +
+      (m.enabled ? '<div class="kpi-meta"><span>' + textHTML('kpi.inference_average') + ' <strong>' + fmtMS(il.avg_ms) + '</strong></span><span>' + textHTML('kpi.degraded') + ' <strong>' + (m.partial_timeouts || 0) + '</strong></span><span>' + textHTML('kpi.queued') + ' <strong>' + (m.waiting || 0) + '</strong></span></div>' : '') +
       '</div>';
 
-    renderBars('kind-bars', s.hits_by_kind, null, false);
-    renderBars('finder-bars', s.hits_by_finder, FINDER_META, true);
-    renderDimTable('protocol-table', s.by_protocol, '协议', '暂无请求数据');
-    renderDimTable('model-table', s.by_model, '模型', '暂无模型数据');
+    renderBars('kind-bars', s.hits_by_kind, 'kind.empty');
+    renderBars('finder-bars', s.hits_by_finder, 'finder.empty', FINDER_META);
+    renderDimTable('protocol-table', s.by_protocol, 'table.protocol', 'table.protocol_empty');
+    renderDimTable('model-table', s.by_model, 'table.model', 'table.model_empty');
 
-    document.getElementById('event-filters').innerHTML = ACTION_FILTERS.map(function(item){
-      var active = state.actionFilter === item[0] ? ' active' : '';
-      return '<button class="btn' + active + '" type="button" data-action="' + esc(item[0]) + '">' + esc(item[1]) + '</button>';
+    document.getElementById('event-filters').innerHTML = ACTION_FILTERS.map(function(action){
+      var active = state.actionFilter === action ? ' active' : '';
+      return '<button class="btn' + active + '" type="button" data-action="' + action + '">' + esc(action ? actionLabel(action) : t('events.all')) + '</button>';
     }).join('');
     Array.prototype.forEach.call(document.querySelectorAll('#event-filters button'), function(btn){
       btn.onclick = function(){
@@ -464,13 +581,13 @@ body.embedded .auth-wrap{margin-top:12px}
 
     var events = st.recent_events || [];
     var countEl = document.getElementById('events-count');
-    if(countEl) countEl.textContent = ' · 共 ' + events.length + ' 条';
+    countEl.textContent = ' · ' + t('events.count', {count: events.length});
     var evEl = document.getElementById('events-table');
     if(!events.length){
-      evEl.innerHTML = '<div class="empty">暂无记录</div>';
+      evEl.innerHTML = '<div class="empty">' + textHTML('common.empty') + '</div>';
       return;
     }
-    evEl.innerHTML = '<div style="overflow-x:auto"><table><thead><tr><th>时间</th><th>阶段</th><th>处理</th><th>协议 / 模型</th><th>大小 / 耗时</th><th>详情</th></tr></thead><tbody>' +
+    evEl.innerHTML = '<div style="overflow-x:auto">' + tableHead(['events.time', 'events.phase', 'events.action', 'events.protocol_model', 'events.size_duration', 'events.details']) +
       events.map(function(ev){
         var detail = '';
         if(ev.hits && ev.hits.length){
@@ -478,18 +595,18 @@ body.embedded .auth-wrap{margin-top:12px}
             var cls = h.action && h.action !== 'mask' ? ' ' + esc(h.action) : '';
             var frag = '<strong>' + esc(h.kind) + '</strong>';
             if(h.by) frag += '<span>[' + esc(h.by) + ']</span>';
-            if(h.head) frag += '<span>' + esc(h.head) + '*** (' + (h.len || 0) + ' 字符)</span>';
-            else if((h.len || 0) > 0) frag += '<span>(' + h.len + ' 字符)</span>';
+            if(h.head) frag += '<span>' + esc(h.head) + '*** (' + textHTML('common.character_count', {count: h.len || 0}) + ')</span>';
+            else if((h.len || 0) > 0) frag += '<span>(' + textHTML('common.character_count', {count: h.len}) + ')</span>';
             if(h.placeholder) frag += '<span>→ ' + esc(h.placeholder) + '</span>';
             if(h.action && h.action !== 'mask') frag += '<span>(' + esc(actionLabel(h.action)) + ')</span>';
             return '<span class="hit-pill' + cls + '">' + frag + '</span>';
           }).join('') + '</div>';
         } else if((ev.restored_count || 0) > 0){
-          detail = '<span class="badge badge-green">还原 ' + ev.restored_count + ' 处占位符</span>';
+          detail = '<span class="badge badge-green">' + textHTML('events.restored', {count: ev.restored_count}) + '</span>';
         } else if(ev.error){
           detail = '<span style="color:var(--red)" class="mono">' + esc(ev.error) + '</span>';
         } else {
-          detail = '<span class="sub">无敏感命中，原样转发</span>';
+          detail = '<span class="sub">' + textHTML('events.no_hits') + '</span>';
         }
         return '<tr>' +
           '<td class="mono" title="' + esc(ev.timestamp) + '">#' + (ev.id || 0) + ' ' + esc(shortTime(ev.timestamp)) + '</td>' +
@@ -511,30 +628,30 @@ body.embedded .auth-wrap{margin-top:12px}
     var badge = document.getElementById('model-status-badge');
     if(!m.enabled){
       badge.className = 'badge badge-muted';
-      badge.textContent = m.installed ? '未启用（权重已就绪）' : '未启用';
+      badge.textContent = m.installed ? t('model.disabled_ready') : t('model.disabled');
     } else if(m.loaded){
       badge.className = 'badge badge-green';
-      badge.textContent = esc(m.name || 'astrlink-guard') + ' · 已加载 (' + (m.cores || 0) + ' 核)';
+      badge.textContent = (m.name || 'astrlink-guard') + ' · ' + t('model.loaded', {count: m.cores || 0});
     } else if(m.downloading){
       badge.className = 'badge badge-amber';
-      badge.textContent = '下载中 ' + dlPct.toFixed(0) + '%';
+      badge.textContent = t('model.downloading_badge', {percent: dlPct.toFixed(0)});
     } else if(m.installed){
       badge.className = 'badge badge-blue';
-      badge.textContent = esc(m.name || 'astrlink-guard') + ' · 权重就绪（按需加载）';
+      badge.textContent = (m.name || 'astrlink-guard') + ' · ' + t('model.weights_ready_on_demand');
     } else {
       badge.className = m.strict ? 'badge badge-red' : 'badge badge-amber';
-      badge.textContent = m.strict ? '缺失权重（strict 将返回 503）' : '缺失权重（降级为规则）';
+      badge.textContent = m.strict ? t('model.weights_missing_strict') : t('model.weights_missing_fallback');
     }
 
     var dlBtn = document.getElementById('model-download-btn');
     dlBtn.classList.toggle('hidden', !(!m.installed && !m.downloading));
-    dlBtn.textContent = m.download_error ? '重试下载权重' : '立即下载权重';
+    dlBtn.textContent = m.download_error ? t('model.retry_download') : t('model.download');
 
     document.getElementById('model-details').innerHTML = [
-      ['模型目录 (model.dir)', m.dir || '(未解析到缓存目录，请设 model.dir 或 CPA_REDUCTANT_MODEL_DIR)'],
-      ['实际加载路径 / 布局', m.resolved_dir ? (m.resolved_dir + ' (' + (m.layout || '-') + ')') : (m.layout || 'missing')],
-      ['策略开关', 'enabled=' + (!!m.enabled) + ' · auto_download=' + (!!m.auto_download) + ' · strict=' + (!!m.strict)],
-      ['阈值 / 超时 / Revision', 'min_score=' + (m.min_score || 0.8) + ' · wait=' + (m.wait_ms || 2000) + 'ms · rev=' + (m.revision || '-')]
+      [t('model.directory'), m.dir || t('model.no_directory')],
+      [t('model.loaded_path'), m.resolved_dir ? (m.resolved_dir + ' (' + (m.layout || '-') + ')') : (m.layout || 'missing')],
+      [t('model.settings'), 'enabled=' + (!!m.enabled) + ' · auto_download=' + (!!m.auto_download) + ' · strict=' + (!!m.strict)],
+      [t('model.parameters_portal'), 'min_score=' + (m.min_score || 0.8) + ' · wait=' + (m.wait_ms || 2000) + 'ms · rev=' + (m.revision || '-')]
     ].map(function(kv){
       return '<div class="kv-item"><div class="kv-label">' + esc(kv[0]) + '</div><div class="kv-val">' + esc(kv[1]) + '</div></div>';
     }).join('');
@@ -542,7 +659,7 @@ body.embedded .auth-wrap{margin-top:12px}
     var progEl = document.getElementById('model-progress');
     if(m.downloading){
       progEl.classList.remove('hidden');
-      progEl.innerHTML = '<div class="bar-head"><span class="sub">正在拉取 AstrLink Guard int8 权重（支持断点续传与 hf-mirror 自动回退）</span>' +
+      progEl.innerHTML = '<div class="bar-head"><span class="sub">' + textHTML('model.fetching_resumable') + '</span>' +
         '<span class="mono">' + fmtBytes(dlDone) + ' / ' + fmtBytes(dlTotal) + ' (' + dlPct.toFixed(1) + '%)</span></div>' +
         '<div class="bar-track" style="margin-top:4px"><div class="bar-fill" style="width:' + dlPct.toFixed(1) + '%"></div></div>';
       startDownloadPoll();
@@ -554,9 +671,10 @@ body.embedded .auth-wrap{margin-top:12px}
 
     var noticeEl = document.getElementById('model-notice');
     if(m.enabled && !m.installed && !m.downloading){
-      noticeEl.innerHTML = '<div class="warn-box">模型已启用但本地尚无权重文件。' +
-        (m.auto_download ? '如后台下载失败，可检查网络/代理后点击「重试下载权重」。' : '当前配置 auto_download=false，可点击「立即下载权重」或手动将权重放入上述目录。') +
-        '</div>';
+      var advice = m.auto_download ?
+        t('model.notice_auto_download', {retry: t('model.retry_download')}) :
+        t('model.notice_manual_download', {download: t('model.download')});
+      noticeEl.innerHTML = '<div class="warn-box">' + textHTML('model.notice_missing_weights') + ' ' + esc(advice) + '</div>';
     } else {
       noticeEl.innerHTML = '';
     }
@@ -564,9 +682,16 @@ body.embedded .auth-wrap{margin-top:12px}
     var dirHint = m.dir || '~/.cache/cpa-reductant/models/astrlink-guard';
     var yamlSnippet = 'plugins:\n  configs:\n    cpa-reductant:\n      enabled: true\n      model:\n        enabled: true\n        # dir: ' + dirHint;
     document.getElementById('model-guide-body').innerHTML =
-      '<div class="sub" style="margin-top:8px">1. <strong>在线启用（最小配置）</strong>：在 CPA <span class="mono">config.yaml</span> 中设 <span class="mono">model.enabled: true</span> 即可自动后台拉取权重（除非显式设 <span class="mono">auto_download: false</span>）。注意顶层 <span class="mono">models</span> 是上游 LLM 过滤名单，不是本地 PII 模型开关。</div>' +
+      '<div class="sub" style="margin-top:8px">1. <strong>' + textHTML('model.guide.online_title') + '</strong>: ' +
+      monoText('model.guide.online_setup', {config: 'config.yaml', enabled: 'model.enabled: true', disable_auto_download: 'auto_download: false'}) + ' ' +
+      monoText('model.guide.online_allowlist', {models: 'models'}) + '</div>' +
       '<pre class="code-box">' + esc(yamlSnippet) + '</pre>' +
-      '<div class="sub" style="margin-top:8px">2. <strong>默认目录与离线部署</strong>：<span class="mono">model.dir</span> 默认读取 <span class="mono">CPA_REDUCTANT_MODEL_DIR</span> 或系统缓存目录（Linux 为 <span class="mono">~/.cache/cpa-reductant/models/astrlink-guard</span>）。离线时从 <span class="mono">QuantumNous/astrlink-guard</span>（rev <span class="mono">' + esc(m.revision || '7216b6a3b897') + '</span>）下载 <span class="mono">int8/</span> 下的 <span class="mono">model_int8.onnx</span>、<span class="mono">model_int8.onnx_data</span>、<span class="mono">tokenizer.json</span> 平铺放入即可。</div>';
+      '<div class="sub" style="margin-top:8px">2. <strong>' + textHTML('model.guide.offline_title') + '</strong>: ' +
+      monoText('model.guide.offline_directory', {setting: 'model.dir', environment: 'CPA_REDUCTANT_MODEL_DIR', linux_directory: '~/.cache/cpa-reductant/models/astrlink-guard'}) + ' ' +
+      monoText('model.guide.offline_weights', {
+        repository: 'QuantumNous/astrlink-guard', revision: m.revision || '7216b6a3b897', subdirectory: 'int8/',
+        model_file: 'model_int8.onnx', data_file: 'model_int8.onnx_data', tokenizer_file: 'tokenizer.json'
+      }) + '</div>';
     if(!state.modelGuideInit){
       state.modelGuideInit = true;
       if(!m.enabled && !m.installed){
@@ -599,17 +724,17 @@ body.embedded .auth-wrap{margin-top:12px}
         body: '{}'
       });
       if(resp.status === 401 || resp.status === 403){
-        showAuth('管理密钥无效或无权限 (HTTP ' + resp.status + ')');
+        showAuth('auth.denied', {status: resp.status});
         return;
       }
       var data = await resp.json();
       if(!resp.ok){
-        document.getElementById('model-notice').innerHTML = '<div class="err-box">' + esc(data.error || ('HTTP ' + resp.status)) + '</div>';
+        setError('model-notice', 'model.download_start_failed', {error: data.error || ('HTTP ' + resp.status)});
         return;
       }
       await window.loadStatus();
     }catch(e){
-      document.getElementById('model-notice').innerHTML = '<div class="err-box">触发下载失败: ' + esc(e) + '</div>';
+      setError('model-notice', 'model.download_start_failed', {error: e});
     }
   };
 
@@ -621,36 +746,46 @@ body.embedded .auth-wrap{margin-top:12px}
         headers: {'Authorization': 'Bearer ' + state.key, 'Accept': 'application/json'}
       });
       if(resp.status === 401 || resp.status === 403){
-        showAuth('管理密钥无效或无权限 (HTTP ' + resp.status + ')');
+        showAuth('auth.denied', {status: resp.status});
         return;
       }
       var data = await resp.json();
       if(!resp.ok){
-        document.getElementById('runtime-errors').innerHTML = '<div class="err-box">' + esc(data.error || ('HTTP ' + resp.status)) + '</div>';
+        showStatusError(data.error || ('HTTP ' + resp.status));
         return;
       }
       showApp();
+      setError('auth-err');
+      delete state.errors['runtime-errors'];
+      delete state.errors['model-notice'];
       renderStatus(data);
       window.loadCapture();
     }catch(e){
-      if(document.getElementById('app').classList.contains('hidden')){
-        showAuth('请求失败: ' + e);
-      } else {
-        document.getElementById('runtime-errors').innerHTML = '<div class="err-box">刷新失败: ' + esc(e) + '</div>';
-      }
+      showStatusError(e);
     }
   };
+
+  function showStatusError(error){
+    if(document.getElementById('app').classList.contains('hidden')){
+      showAuth('common.request_failed', {error: error});
+    } else {
+      setError('runtime-errors', 'header.refresh_failed', {error: error});
+    }
+  }
+
+  var AUTO_REFRESH_SECONDS = 5;
+  function renderAutoRefresh(){
+    var btn = document.getElementById('auto-refresh-btn');
+    btn.classList.toggle('active', !!state.autoTimer);
+    btn.textContent = t(state.autoTimer ? 'header.stop_auto_refresh' : 'header.start_auto_refresh', {sec: AUTO_REFRESH_SECONDS});
+  }
 
   function stopAutoRefresh(){
     if(state.autoTimer){
       clearInterval(state.autoTimer);
       state.autoTimer = null;
     }
-    var btn = document.getElementById('auto-refresh-btn');
-    if(btn){
-      btn.classList.remove('active');
-      btn.textContent = '5s 自动刷新';
-    }
+    renderAutoRefresh();
   }
 
   window.toggleAutoRefresh = function(){
@@ -658,10 +793,8 @@ body.embedded .auth-wrap{margin-top:12px}
       stopAutoRefresh();
       return;
     }
-    state.autoTimer = setInterval(window.loadStatus, 5000);
-    var btn = document.getElementById('auto-refresh-btn');
-    btn.classList.add('active');
-    btn.textContent = '停止自动刷新 (5s)';
+    state.autoTimer = setInterval(window.loadStatus, AUTO_REFRESH_SECONDS * 1000);
+    renderAutoRefresh();
   };
 
   window.openJSON = function(){
@@ -674,7 +807,7 @@ body.embedded .auth-wrap{margin-top:12px}
 
   window.disconnectKey = function(){
     document.getElementById('secret-input').value = '';
-    showAuth('');
+    showAuth();
   };
 
   function prettyText(s){
@@ -682,62 +815,68 @@ body.embedded .auth-wrap{margin-top:12px}
     try{ return JSON.stringify(JSON.parse(s), null, 2); }catch(_){ return s; }
   }
 
+  function capturePane(key, bytes, truncated, body){
+    return '<div class="diff-pane"><div class="diff-title"><span>' + textHTML(key) + '</span><span class="mono">' +
+      fmtBytes(bytes) + (truncated ? ' · ' + textHTML('capture.truncated') : '') + '</span></div><pre class="code-box">' + esc(body) + '</pre></div>';
+  }
+
   function renderCapture(snap){
+    state.lastCapture = snap;
     state.captureEnabled = !!(snap && snap.enabled);
     var badge = document.getElementById('cap-badge');
     var btn = document.getElementById('cap-toggle-btn');
     var entries = (snap && snap.entries) || [];
     if(state.captureEnabled){
       badge.className = 'badge badge-amber';
-      badge.textContent = '抓包中 · 剩余 ' + (snap.remaining_seconds || 0) + 's';
+      badge.textContent = t('capture.remaining', {sec: snap.remaining_seconds || 0});
       btn.className = 'btn active';
-      btn.textContent = '停止抓包';
+      btn.textContent = t('capture.stop');
     }else{
       badge.className = 'badge badge-muted';
-      badge.textContent = '已关闭 · 缓存 ' + entries.length + ' 条';
+      badge.textContent = t('capture.cached', {count: entries.length});
       btn.className = 'btn';
-      btn.textContent = '开启抓包';
+      btn.textContent = t('capture.start');
     }
     var list = document.getElementById('cap-list');
     if(!entries.length){
-      list.innerHTML = '<div class="empty">' + (state.captureEnabled ? '抓包已开启，等待新请求...' : '暂无抓包记录') + '</div>';
+      list.innerHTML = '<div class="empty">' + textHTML(state.captureEnabled ? 'capture.waiting' : 'capture.empty') + '</div>';
       return;
     }
     list.innerHTML = entries.map(function(ev){
       var openAttr = state.openCaptures[ev.id] ? ' open' : '';
       var reps = ev.replacements || [];
       var restored = ev.restored_items || [];
-      var repHtml = reps.length ? ('<table><thead><tr><th>原文</th><th>替换值 / 占位符</th><th>类型</th><th>方式</th><th>动作</th></tr></thead><tbody>' +
+      var repHtml = reps.length ? (tableHead(['capture.original', 'capture.replacement', 'capture.kind', 'capture.finder', 'capture.action']) +
         reps.map(function(r){
-          var orig = r.original ? '<span class="orig-val">' + esc(r.original) + '</span>' : '<span class="sub">(未替换 · 仅告警)</span>';
+          var orig = r.original ? '<span class="orig-val">' + esc(r.original) + '</span>' : '<span class="sub">' + textHTML('capture.warn_only') + '</span>';
           return '<tr><td class="mono">' + orig + '</td><td class="mono ph-val">' + esc(r.placeholder || '-') + '</td><td class="mono">' + esc(r.kind) + '</td><td class="mono">' + esc(r.by || '-') + '</td><td class="mono">' + esc(actionLabel(r.action || 'mask')) + '</td></tr>';
-        }).join('') + '</tbody></table>') : '<div class="sub">请求阶段无敏感替换</div>';
-      var resHtml = restored.length ? ('<table><thead><tr><th>占位符</th><th>还原原文</th><th>次数</th></tr></thead><tbody>' +
+        }).join('') + '</tbody></table>') : '<div class="sub">' + textHTML('capture.no_replacements') + '</div>';
+      var resHtml = restored.length ? (tableHead(['capture.placeholder', 'capture.restored_text', 'capture.occurrences']) +
         restored.map(function(r){
           return '<tr><td class="mono ph-val">' + esc(r.placeholder) + '</td><td class="mono orig-val">' + esc(r.original || '-') + '</td><td class="mono">' + (r.count || 0) + '</td></tr>';
         }).join('') + '</tbody></table>') : '';
       var statusBadge = '';
-      if(ev.status === 'streaming') statusBadge = '<span class="badge badge-amber">流式传输中</span>';
-      else if(ev.status === 'pending') statusBadge = '<span class="badge badge-muted">等待响应</span>';
-      else if(ev.status === 'error') statusBadge = '<span class="badge badge-red">异常</span>';
-      var upText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + fmtBytes(ev.upstream_response_bytes || 0) + ']') : (prettyText(ev.upstream_response) || (ev.status === 'streaming' ? '[流式传输中，等待数据...]' : ''));
-      var reText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + fmtBytes(ev.restored_response_bytes || 0) + ']') : (prettyText(ev.restored_response) || (ev.status === 'streaming' ? '[流式传输中，等待输出...]' : ''));
+      if(ev.status === 'streaming') statusBadge = '<span class="badge badge-amber">' + textHTML('capture.streaming') + '</span>';
+      else if(ev.status === 'pending') statusBadge = '<span class="badge badge-muted">' + textHTML('capture.pending') + '</span>';
+      else if(ev.status === 'error') statusBadge = '<span class="badge badge-red">' + textHTML('capture.failed') + '</span>';
+      var upText = ev.response_binary ? t('capture.binary_response', {content_type: ev.response_content_type || '', size: fmtBytes(ev.upstream_response_bytes)}) : (prettyText(ev.upstream_response) || (ev.status === 'streaming' ? t('capture.waiting_for_data') : ''));
+      var reText = ev.response_binary ? t('capture.binary_response', {content_type: ev.response_content_type || '', size: fmtBytes(ev.restored_response_bytes)}) : (prettyText(ev.restored_response) || (ev.status === 'streaming' ? t('capture.waiting_for_output') : ''));
       return '<details class="cap-item" data-cap-id="' + ev.id + '"' + openAttr + '>' +
         '<summary class="cap-summary">' +
           '<span class="mono"><strong>#' + ev.id + '</strong> ' + esc(shortTime(ev.timestamp)) + ' · ' + esc(ev.protocol || '-') + (ev.model ? ' / ' + esc(ev.model) : '') + (ev.stream ? ' [SSE]' : '') + '</span>' +
-          '<span class="actions">' + statusBadge + '<span class="badge ' + actionClass(ev.action) + '">' + esc(actionLabel(ev.action)) + '</span><span class="sub mono">替换 ' + reps.length + ' · 还原 ' + (ev.restored_count || 0) + '</span></span>' +
+          '<span class="actions">' + statusBadge + '<span class="badge ' + actionClass(ev.action) + '">' + esc(actionLabel(ev.action)) + '</span><span class="sub mono">' + textHTML('capture.summary', {replaced: reps.length, restored: ev.restored_count || 0}) + '</span></span>' +
         '</summary>' +
         '<div class="cap-body">' +
           (ev.error ? '<div class="err-box">' + esc(ev.error) + '</div>' : '') +
-          '<div><div class="diff-title"><span>请求替换明细 (' + reps.length + ')</span></div>' + repHtml + '</div>' +
-          (resHtml ? '<div><div class="diff-title"><span>响应还原明细 (' + (ev.restored_count || 0) + ')</span></div>' + resHtml + '</div>' : '') +
+          '<div><div class="diff-title"><span>' + textHTML('capture.request_details', {count: reps.length}) + '</span></div>' + repHtml + '</div>' +
+          (resHtml ? '<div><div class="diff-title"><span>' + textHTML('capture.response_details', {count: ev.restored_count || 0}) + '</span></div>' + resHtml + '</div>' : '') +
           '<div class="diff-grid">' +
-            '<div class="diff-pane"><div class="diff-title"><span>原始请求 (Raw)</span><span class="mono">' + fmtBytes(ev.raw_request_bytes || 0) + (ev.raw_request_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + esc(prettyText(ev.raw_request)) + '</pre></div>' +
-            '<div class="diff-pane"><div class="diff-title"><span>脱敏请求 (Masked → 上游)</span><span class="mono">' + fmtBytes(ev.masked_request_bytes || 0) + (ev.masked_request_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + esc(prettyText(ev.masked_request)) + '</pre></div>' +
+            capturePane('capture.raw_request', ev.raw_request_bytes, ev.raw_request_truncated, prettyText(ev.raw_request)) +
+            capturePane('capture.masked_request', ev.masked_request_bytes, ev.masked_request_truncated, prettyText(ev.masked_request)) +
           '</div>' +
           '<div class="diff-grid">' +
-            '<div class="diff-pane"><div class="diff-title"><span>上游原始响应 (Upstream)</span><span class="mono">' + fmtBytes(ev.upstream_response_bytes || 0) + (ev.upstream_response_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + esc(upText) + '</pre></div>' +
-            '<div class="diff-pane"><div class="diff-title"><span>还原后响应 (Restored → 客户端)</span><span class="mono">' + fmtBytes(ev.restored_response_bytes || 0) + (ev.restored_response_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + esc(reText) + '</pre></div>' +
+            capturePane('capture.upstream_response', ev.upstream_response_bytes, ev.upstream_response_truncated, upText) +
+            capturePane('capture.restored_response', ev.restored_response_bytes, ev.restored_response_truncated, reText) +
           '</div>' +
         '</div></details>';
     }).join('');
@@ -748,9 +887,7 @@ body.embedded .auth-wrap{margin-top:12px}
 
   async function callCapture(method, body){
     if(!state.key) return;
-    var errEl = document.getElementById('cap-err');
-    errEl.textContent = '';
-    errEl.classList.add('hidden');
+    setError('cap-err');
     try{
       var headers = {'Authorization': 'Bearer ' + state.key, 'Accept': 'application/json'};
       var opts = {method: method, headers: headers};
@@ -760,19 +897,17 @@ body.embedded .auth-wrap{margin-top:12px}
       }
       var resp = await fetch(DEBUG_CAPTURE_URL, opts);
       if(resp.status === 401 || resp.status === 403){
-        showAuth('管理密钥无效或无权限 (HTTP ' + resp.status + ')');
+        showAuth('auth.denied', {status: resp.status});
         return;
       }
       var data = await resp.json();
       if(!resp.ok){
-        errEl.textContent = data.error || ('HTTP ' + resp.status);
-        errEl.classList.remove('hidden');
+        setError('cap-err', 'capture.request_failed', {error: data.error || ('HTTP ' + resp.status)});
         return;
       }
       renderCapture(data);
     }catch(e){
-      errEl.textContent = '抓包请求失败: ' + e;
-      errEl.classList.remove('hidden');
+      setError('cap-err', 'capture.request_failed', {error: e});
     }
   }
 
@@ -791,12 +926,33 @@ body.embedded .auth-wrap{margin-top:12px}
     return callCapture('DELETE');
   };
 
+  function renderPreviewMeta(){
+    var data = state.lastPreview && state.lastPreview.data;
+    document.getElementById('preview-meta').textContent = state.previewPending ? t('preview.processing') :
+      data ? t('preview.metrics', {ms: data.duration_ms, count: (data.hits || []).length}) : '';
+  }
+
+  function renderPreview(result){
+    var out = document.getElementById('preview-out');
+    out.style.display = 'block';
+    if(result.error){
+      out.textContent = t(result.error.key, result.error.vars);
+    } else {
+      var data = result.data;
+      var hits = (data.hits || []).map(function(h){
+        return '- ' + h.Kind + ' [' + (h.By || '-') + '] ' + actionLabel(h.Action || 'mask') + ' ' +
+          (h.Head ? h.Head + '*** ' : '') + '(' + t('common.character_count', {count: h.Len}) + ') -> ' + (h.Placeholder || '');
+      }).join('\n');
+      out.textContent = t('preview.result') + '\n' + data.masked + '\n\n' + t('preview.hits') + '\n' + (hits || t('preview.no_hits'));
+    }
+    renderPreviewMeta();
+  }
+
   window.runPreview = async function(){
     var input = document.getElementById('preview-input').value;
-    var out = document.getElementById('preview-out');
-    var meta = document.getElementById('preview-meta');
     if(!input || !state.key) return;
-    meta.textContent = '处理中...';
+    state.previewPending = true;
+    renderPreviewMeta();
     try{
       var resp = await fetch(PREVIEW_URL, {
         method: 'POST',
@@ -807,25 +963,17 @@ body.embedded .auth-wrap{margin-top:12px}
         body: JSON.stringify({text: input})
       });
       if(resp.status === 401 || resp.status === 403){
-        showAuth('管理密钥无效或无权限 (HTTP ' + resp.status + ')');
+        showAuth('auth.denied', {status: resp.status});
         return;
       }
       var data = await resp.json();
-      out.style.display = 'block';
-      if(!resp.ok){
-        out.textContent = '错误: ' + (data.error || resp.status);
-        meta.textContent = '';
-        return;
-      }
-      var hits = (data.hits || []).map(function(h){
-        return '- ' + h.Kind + ' [' + (h.By || '-') + '] ' + (h.Action || 'mask') + ' ' + (h.Head ? h.Head + '*** ' : '') + '(' + h.Len + ' 字符) -> ' + (h.Placeholder || '');
-      }).join('\n');
-      out.textContent = '脱敏结果：\n' + data.masked + (hits ? '\n\n命中列表：\n' + hits : '\n\n命中列表：\n无');
-      meta.textContent = '耗时 ' + data.duration_ms + ' ms · 命中 ' + (data.hits ? data.hits.length : 0) + ' 项';
+      state.lastPreview = resp.ok ? {data: data} : {error: {key: 'common.error', vars: {error: data.error || resp.status}}};
     }catch(e){
-      out.style.display = 'block';
-      out.textContent = '请求失败: ' + e;
-      meta.textContent = '';
+      state.lastPreview = {error: {key: 'preview.request_failed_help', vars: {endpoint: PREVIEW_URL, error: e}}};
+    }finally{
+      state.previewPending = false;
+      if(state.lastPreview) renderPreview(state.lastPreview);
+      else renderPreviewMeta();
     }
   };
 
@@ -875,6 +1023,7 @@ body.embedded .auth-wrap{margin-top:12px}
       }
     });
   }
+  initLanguage();
   initCardFolds();
 
   try{

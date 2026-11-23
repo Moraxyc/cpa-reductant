@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/moraxyc/cpa-reductant/internal/engine"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -135,6 +137,109 @@ func TestI18nMessagesJSON(t *testing.T) {
 		want := localeMessages[option.Code]
 		if !maps.Equal(current, want) || !maps.Equal(all[option.Code], want) {
 			t.Errorf("JSON messages for %s do not match the embedded dictionary", option.Code)
+		}
+	}
+}
+
+func TestI18nTemplateKeysExist(t *testing.T) {
+	english := localeMessages[localeEN]
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`\.Tf?\s+"([a-z0-9_.]+)"`),
+		regexp.MustCompile(`\b(?:t|textHTML|monoText)\(\s*'([a-z0-9_.]+)'\s*[,)]`),
+		regexp.MustCompile(`data-i18n(?:-[a-z]+)?="([a-z0-9_.]+)"`),
+	}
+	for name, content := range map[string]string{
+		"dashboard.html": dashboardHTML,
+		"portal.html":    portalHTML,
+	} {
+		for _, pat := range patterns {
+			for _, m := range pat.FindAllStringSubmatch(content, -1) {
+				key := m[1]
+				if _, ok := english[key]; !ok {
+					t.Errorf("%s references unknown i18n key %q", name, key)
+				}
+			}
+		}
+	}
+}
+
+func TestManagementUII18n(t *testing.T) {
+	p := NewPlugin(engine.New(nil), &fakeHost{})
+	defer p.Shutdown()
+
+	if _, err := p.Dispatch(pluginabi.MethodPluginRegister, mustJSON(t, map[string]any{
+		"config_yaml": []byte("words: [SYNTHETIC-I18N-SECRET]\n"),
+	})); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// Default dashboard renders in English without leftover template errors or Han characters.
+	enRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/management/cpa-reductant/ui",
+	}))
+	if err != nil {
+		t.Fatalf("dashboard en: %v", err)
+	}
+	enHTML := string(enRaw.(pluginapi.ManagementResponse).Body)
+	for _, want := range []string{`<html lang="en">`, `<title>cpa-reductant Status Dashboard</title>`, `Requests processed`, `id="lang-select"`} {
+		if !strings.Contains(enHTML, want) {
+			t.Errorf("English dashboard missing %q", want)
+		}
+	}
+	for _, bad := range []string{`/*__DASHBOARD_CSS__*/`, `ZgotmplZ`} {
+		if strings.Contains(enHTML, bad) {
+			t.Errorf("English dashboard contains broken marker %q", bad)
+		}
+	}
+
+	// Query ?lang=zh-CN renders Chinese and propagates lang in filter/refresh links.
+	zhRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/management/cpa-reductant/ui",
+		Query:  url.Values{"lang": {"zh-CN"}},
+	}))
+	if err != nil {
+		t.Fatalf("dashboard zh-CN: %v", err)
+	}
+	zhHTML := string(zhRaw.(pluginapi.ManagementResponse).Body)
+	for _, want := range []string{`<html lang="zh-CN">`, `<title>cpa-reductant 状态监控</title>`, `请求处理`, `action=mask&amp;lang=zh-CN`, `refresh=5&amp;lang=zh-CN`} {
+		if !strings.Contains(zhHTML, want) {
+			t.Errorf("zh-CN dashboard missing %q", want)
+		}
+	}
+
+	// Cookie and Accept-Language negotiation work on SSR dashboard.
+	cookieRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method:  http.MethodGet,
+		Path:    "/v0/management/cpa-reductant/ui",
+		Headers: http.Header{"Cookie": {langCookieName + "=zh-CN"}},
+	}))
+	if err != nil {
+		t.Fatalf("dashboard cookie: %v", err)
+	}
+	if !strings.Contains(string(cookieRaw.(pluginapi.ManagementResponse).Body), `<html lang="zh-CN">`) {
+		t.Errorf("expected Cookie to select zh-CN")
+	}
+
+	// Portal injects full i18n bundle, resolves initial lang from Accept-Language, and replaces all markers.
+	portalRaw, err := p.Dispatch(pluginabi.MethodManagementHandle, mustJSON(t, pluginapi.ManagementRequest{
+		Method:  http.MethodGet,
+		Path:    "/v0/resource/plugins/cpa-reductant/ui",
+		Headers: http.Header{"Accept-Language": {"zh-CN,zh;q=0.9,en;q=0.8"}},
+	}))
+	if err != nil {
+		t.Fatalf("portal zh-CN: %v", err)
+	}
+	portalBody := string(portalRaw.(pluginapi.ManagementResponse).Body)
+	for _, want := range []string{`<html lang="zh-CN">`, `"Requests processed"`, `"请求处理"`, `"简体中文"`, `class="select lang-select"`} {
+		if !strings.Contains(portalBody, want) {
+			t.Errorf("portal HTML missing %q", want)
+		}
+	}
+	for _, bad := range []string{`/*__DASHBOARD_CSS__*/`, `/*__I18N_BUNDLE__*/`, `/*__I18N_LOCALES__*/`, `__INITIAL_LANG__`, `__LANG_COOKIE__`, `SYNTHETIC-I18N-SECRET`} {
+		if strings.Contains(portalBody, bad) {
+			t.Errorf("portal HTML contains unexpected marker or secret %q", bad)
 		}
 	}
 }

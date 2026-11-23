@@ -141,15 +141,23 @@ var dashboardTmpl = template.Must(template.New("dashboard").Funcs(template.FuncM
 	},
 }).Parse(strings.Replace(dashboardHTML, "/*__DASHBOARD_CSS__*/", dashboardCSS, 1)))
 
-func renderPortalHTML() pluginapi.ManagementResponse {
-	html := strings.Replace(portalHTML, "/*__DASHBOARD_CSS__*/", dashboardCSS, 1)
+func renderPortalHTML(locale string) pluginapi.ManagementResponse {
+	tr := newTranslator(locale)
+	replacer := strings.NewReplacer(
+		"/*__DASHBOARD_CSS__*/", dashboardCSS,
+		"__INITIAL_LANG__", tr.Locale(),
+		"/*__I18N_BUNDLE__*/", allLocalesJSON(),
+		"/*__I18N_LOCALES__*/", supportedLocalesJSON(),
+		"__LANG_COOKIE__", langCookieName,
+	)
 	return pluginapi.ManagementResponse{
 		StatusCode: http.StatusOK,
 		Headers: http.Header{
 			"Content-Type":  {"text/html; charset=utf-8"},
 			"Cache-Control": {"no-store"},
+			"Vary":          {"Accept-Language, Cookie"},
 		},
-		Body: []byte(html),
+		Body: []byte(replacer.Replace(portalHTML)),
 	}
 }
 
