@@ -63,6 +63,7 @@ type PolicySummary struct {
 	KeyPathConfigured bool              `json:"key_path_configured"`
 	KeyPathActive     bool              `json:"key_path_active"`
 	KeyPathError      string            `json:"key_path_error,omitempty"`
+	ScopeIsolation    bool              `json:"scope_isolation,omitempty"`
 }
 
 type Status struct {
@@ -74,6 +75,7 @@ type Status struct {
 	Policy             PolicySummary `json:"policy"`
 	Stats              StatsSnapshot `json:"stats"`
 	Model              ModelStatus   `json:"model"`
+	Scope              ScopeStats    `json:"scope"`
 	RecentEvents       []FilterEvent `json:"recent_events,omitempty"`
 }
 
@@ -315,6 +317,7 @@ type Engine struct {
 	stats     engineStats
 	events    *eventRing
 	capture   *debugCapture
+	scopes    *scopeVault
 	startedAt time.Time
 
 	metaMu             sync.Mutex
@@ -340,6 +343,7 @@ func New(cfg *config.Config) *Engine {
 		model:          newModelRunner(cfg.EffectiveModelRunnerConfig()),
 		events:         newEventRing(defaultEventRing),
 		capture:        newDebugCapture(defaultCaptureCapacity),
+		scopes:         newScopeVault(defaultScopeMaxScopes, defaultScopeMaxEntries, cfg.EffectiveScopeTTL()),
 		startedAt:      time.Now().UTC(),
 		keyPathInitial: keyPath,
 	}
@@ -410,6 +414,9 @@ func (e *Engine) Update(cfg *config.Config) {
 	e.metaMu.Unlock()
 
 	e.cfg.Store(cfg)
+	if e.scopes != nil {
+		e.scopes.SetTTL(cfg.EffectiveScopeTTL())
+	}
 	if e.model != nil {
 		e.model.Configure(cfg.EffectiveModelRunnerConfig())
 	}
@@ -523,11 +530,20 @@ func (e *Engine) StatusWithOptions(eventLimit int, actionFilter string) Status {
 			KeyPathConfigured: keyPath != "",
 			KeyPathActive:     keyActive,
 			KeyPathError:      keyErr,
+			ScopeIsolation:    cfg.ScopeIsolation,
 		},
 		Stats:        e.stats.snapshot(),
 		Model:        e.ModelStatus(),
+		Scope:        e.scopeStats(cfg.ScopeIsolation),
 		RecentEvents: recent,
 	}
+}
+
+func (e *Engine) scopeStats(enabled bool) ScopeStats {
+	if e == nil || e.scopes == nil {
+		return ScopeStats{Enabled: enabled}
+	}
+	return e.scopes.Snapshot(enabled)
 }
 
 func (e *Engine) redactOptions(ctx context.Context, cfg *config.Config, route string, seen func(redact.Hit), modelErr *error) redact.Options {
@@ -723,6 +739,21 @@ func (e *Engine) MaskRequest(ctx context.Context, meta RequestMeta, body []byte)
 	e.stats.recordMask(meta.Protocol, meta.Model, len(body), hits, blocked, dur)
 	e.touchActivity()
 
+	if !blocked && e.scopes != nil && meta.CallerScope != "" {
+		baseCfg := e.Config()
+		if baseCfg != nil && baseCfg.ScopeIsolation {
+			var placeholders []string
+			for _, h := range hits {
+				if h.Placeholder != "" && h.Action != redact.Warn && h.Action != redact.Block {
+					placeholders = append(placeholders, h.Placeholder)
+				}
+			}
+			if len(placeholders) > 0 {
+				e.scopes.Record(meta.CallerScope, placeholders...)
+			}
+		}
+	}
+
 	action := "passthrough"
 	warnCount := 0
 	maskCount := 0
@@ -862,7 +893,7 @@ func (e *Engine) RestoreResponseWithMeta(meta RequestMeta, contentType string, b
 		hdr.Set("Content-Type", "application/json")
 	}
 	buf := &restoreBuffer{header: hdr}
-	w := redact.NewWriter(buf)
+	w := e.NewStreamWriterForScope(buf, meta.CallerScope, meta.Protocol, meta.Model)
 	_, _ = w.Write(body)
 	w.Finish()
 
@@ -1094,5 +1125,17 @@ func IsBinaryContentType(ct string) bool {
 }
 
 func (e *Engine) NewStreamWriter(w http.ResponseWriter) *redact.Writer {
+	return redact.NewWriter(w)
+}
+
+func (e *Engine) NewStreamWriterForScope(w http.ResponseWriter, scope, protocol, model string) StreamWriter {
+	if e != nil && e.scopes != nil && strings.TrimSpace(scope) != "" {
+		baseCfg := e.Config()
+		if baseCfg != nil && baseCfg.ScopeIsolation {
+			policyCfg := baseCfg.ResolvePolicy(protocol, model)
+			shape := policyCfg != nil && policyCfg.Shape
+			return newScopedStreamWriter(w, e.scopes, scope, shape)
+		}
+	}
 	return redact.NewWriter(w)
 }

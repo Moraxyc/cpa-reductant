@@ -16,7 +16,6 @@ import (
 	"github.com/moraxyc/cpa-reductant/internal/engine"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-	"github.com/yetone/magpie/pkg/redact"
 )
 
 const (
@@ -100,10 +99,11 @@ type interceptSession struct {
 	stream         bool
 	captureID      uint64
 	hostCallbackID string
+	callerScope    string
 	startedAt      time.Time
 
 	streamInit   bool
-	writer       *redact.Writer
+	writer       engine.StreamWriter
 	buffer       *sseBuffer
 	normalizer   streamPayloadNormalizer
 	contentType  string
@@ -251,7 +251,7 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 				return nil, err
 			}
 			headers := streamResponseHeaders(upstream.Headers, masked.ExitProtocol, masked.Alt)
-			go p.forwardStream(upstream.StreamID, request.StreamID, masked.ExitProtocol, masked.Model, masked.HostCallbackID, masked.Alt, headers, masked.CaptureID)
+			go p.forwardStream(upstream.StreamID, request.StreamID, masked.ExitProtocol, masked.Model, masked.HostCallbackID, masked.CallerScope, masked.Alt, headers, masked.CaptureID)
 			return map[string]any{"headers": headers}, nil
 		}
 		var reply pluginapi.HostModelExecutionResponse
@@ -264,6 +264,7 @@ func (p *Plugin) Dispatch(method string, input []byte) (any, error) {
 			Model:          masked.Model,
 			HostCallbackID: masked.HostCallbackID,
 			CaptureID:      masked.CaptureID,
+			CallerScope:    masked.CallerScope,
 		}, reply.Headers.Get("Content-Type"), reply.Body)
 		return pluginapi.ExecutorResponse{
 			Payload: restored,
@@ -600,6 +601,7 @@ func (p *Plugin) handleRequestInterceptBefore(req requestInterceptRequest) plugi
 	if model == "" {
 		model = requestedModel
 	}
+	callerScope, _ := req.Metadata[pluginapi.CallerScopeMetadataKey].(string)
 	captureID := p.engine.BeginCapture()
 	masked, err := p.engine.MaskRequest(context.Background(), engine.RequestMeta{
 		Route:          model,
@@ -608,6 +610,7 @@ func (p *Plugin) handleRequestInterceptBefore(req requestInterceptRequest) plugi
 		Stream:         req.Stream,
 		HostCallbackID: req.HostCallbackID,
 		CaptureID:      captureID,
+		CallerScope:    callerScope,
 	}, req.Body)
 	if err != nil {
 		if errors.Is(err, engine.ErrBlocked) {
@@ -624,6 +627,7 @@ func (p *Plugin) handleRequestInterceptBefore(req requestInterceptRequest) plugi
 		stream:         req.Stream,
 		captureID:      captureID,
 		hostCallbackID: req.HostCallbackID,
+		callerScope:    callerScope,
 		startedAt:      time.Now(),
 	})
 	return pluginapi.RequestInterceptResponse{Body: masked}
@@ -646,6 +650,7 @@ func (p *Plugin) handleResponseInterceptAfter(req responseInterceptRequest) plug
 		Model:          sess.model,
 		HostCallbackID: callbackID,
 		CaptureID:      sess.captureID,
+		CallerScope:    sess.callerScope,
 	}, req.ResponseHeaders.Get("Content-Type"), req.Body)
 	if restoredCount == 0 && bytes.Equal(restored, req.Body) {
 		return pluginapi.ResponseInterceptResponse{}
@@ -660,7 +665,7 @@ func (s *interceptSession) initStream(eng *engine.Engine, respHeaders http.Heade
 	s.streamInit = true
 	s.contentType = respHeaders.Get("Content-Type")
 	s.buffer = &sseBuffer{headers: writerHeadersForStream(respHeaders, s.protocol, "")}
-	s.writer = eng.NewStreamWriter(s.buffer)
+	s.writer = eng.NewStreamWriterForScope(s.buffer, s.callerScope, s.protocol, s.model)
 	s.normalizer = streamPayloadNormalizer{
 		exitProtocol: s.protocol,
 		contentType:  s.contentType,
@@ -824,6 +829,7 @@ func (p *Plugin) prepareModelRequest(request executorRequest, stream bool) (mode
 	if exitProtocol == "" {
 		exitProtocol = entryProtocol
 	}
+	callerScope, _ := request.Metadata[pluginapi.CallerScopeMetadataKey].(string)
 	captureID := p.engine.BeginCapture()
 	masked, err := p.engine.MaskRequest(context.Background(), engine.RequestMeta{
 		Route:          request.Model,
@@ -832,6 +838,7 @@ func (p *Plugin) prepareModelRequest(request executorRequest, stream bool) (mode
 		Stream:         stream,
 		HostCallbackID: request.HostCallbackID,
 		CaptureID:      captureID,
+		CallerScope:    callerScope,
 	}, body)
 	if err != nil {
 		if errors.Is(err, engine.ErrBlocked) {
@@ -842,7 +849,6 @@ func (p *Plugin) prepareModelRequest(request executorRequest, stream bool) (mode
 		}
 		return modelRequest{}, err
 	}
-	callerScope, _ := request.Metadata[pluginapi.CallerScopeMetadataKey].(string)
 	reqPath, _ := request.Metadata[requestPathMetadataKey].(string)
 	return modelRequest{
 		HostCallbackID: request.HostCallbackID,
@@ -862,9 +868,9 @@ func (p *Plugin) prepareModelRequest(request executorRequest, stream bool) (mode
 	}, nil
 }
 
-func (p *Plugin) forwardStream(upstreamID, outputID, exitProtocol, model, callbackID, alt string, headers http.Header, captureID uint64) {
+func (p *Plugin) forwardStream(upstreamID, outputID, exitProtocol, model, callbackID, callerScope, alt string, headers http.Header, captureID uint64) {
 	update := streamUpdate{StreamID: outputID}
-	if err := p.restoreStream(upstreamID, outputID, exitProtocol, model, callbackID, alt, headers, captureID); err != nil {
+	if err := p.restoreStream(upstreamID, outputID, exitProtocol, model, callbackID, callerScope, alt, headers, captureID); err != nil {
 		update.Error = err.Error()
 		var abiErr *pluginabi.Error
 		if errors.As(err, &abiErr) && abiErr != nil {
@@ -876,13 +882,13 @@ func (p *Plugin) forwardStream(upstreamID, outputID, exitProtocol, model, callba
 
 const streamCaptureFlushInterval = 250 * time.Millisecond
 
-func (p *Plugin) restoreStream(upstreamID, outputID, exitProtocol, model, callbackID, alt string, headers http.Header, captureID uint64) error {
+func (p *Plugin) restoreStream(upstreamID, outputID, exitProtocol, model, callbackID, callerScope, alt string, headers http.Header, captureID uint64) error {
 	start := time.Now()
 	stream := pluginapi.HostModelStreamCloseRequest{StreamID: upstreamID}
 	defer func() { _ = p.host.Call(pluginabi.MethodHostModelStreamClose, stream, nil) }()
 
 	buffer := &sseBuffer{headers: writerHeadersForStream(headers, exitProtocol, alt)}
-	writer := p.engine.NewStreamWriter(buffer)
+	writer := p.engine.NewStreamWriterForScope(buffer, callerScope, exitProtocol, model)
 	contentType := headers.Get("Content-Type")
 	normalizer := streamPayloadNormalizer{
 		exitProtocol: exitProtocol,

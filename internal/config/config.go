@@ -38,6 +38,7 @@ const (
 
 	DefaultModelWaitMS       = 2000
 	DefaultModelStrictWaitMS = 15000
+	DefaultScopeTTLSeconds   = 86400
 )
 
 var Version = "dev"
@@ -225,9 +226,11 @@ type Config struct {
 	Allow         []string          `yaml:"allow"`
 	Shape         bool              `yaml:"shape"`
 	BlockTerms    bool              `yaml:"block_terms"`
-	KeyPath       string            `yaml:"key_path"`
-	Model         ModelConfig       `yaml:"model"`
-	Policies      []PolicyOverride  `yaml:"policies"`
+	KeyPath         string            `yaml:"key_path"`
+	ScopeIsolation  bool              `yaml:"scope_isolation"`
+	ScopeTTLSeconds int               `yaml:"scope_ttl_seconds"`
+	Model           ModelConfig       `yaml:"model"`
+	Policies        []PolicyOverride  `yaml:"policies"`
 }
 
 func SupportedProtocols() []string {
@@ -384,7 +387,17 @@ func validateActions(actions map[string]string) error {
 	return nil
 }
 
+func (c *Config) EffectiveScopeTTL() time.Duration {
+	if c != nil && c.ScopeTTLSeconds > 0 {
+		return time.Duration(c.ScopeTTLSeconds) * time.Second
+	}
+	return DefaultScopeTTLSeconds * time.Second
+}
+
 func (c *Config) validate() error {
+	if c.ScopeTTLSeconds < 0 {
+		return fmt.Errorf("scope_ttl_seconds must be >= 0, got %d", c.ScopeTTLSeconds)
+	}
 	if err := c.Model.Validate(); err != nil {
 		return err
 	}
@@ -683,6 +696,8 @@ func Metadata() pluginapi.Metadata {
 			{Name: "shape", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Use format-preserving synthetic stand-ins instead of {{...}} placeholders"},
 			{Name: "block_terms", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Reject instead of masking configured terms"},
 			{Name: "key_path", Type: pluginapi.ConfigFieldTypeString, Description: "Path to persist the 32-byte placeholder HMAC key across restarts"},
+			{Name: "scope_isolation", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Isolate placeholder restoration per CPA CallerScope to prevent cross-tenant placeholder oracle leaks (default: false)"},
+			{Name: "scope_ttl_seconds", Type: pluginapi.ConfigFieldTypeNumber, Description: "Retention TTL in seconds for per-CallerScope tracked placeholders when scope_isolation is enabled (default: 86400)"},
 			{Name: "model", Type: pluginapi.ConfigFieldTypeObject, Description: "Local PII NER model (astrlink-guard): set enabled=true (auto-downloads by default unless auto_download=false); fields: enabled, auto_download, name, dir, min_score, strict, wait_ms, mirror"},
 			{Name: "policies", Type: pluginapi.ConfigFieldTypeArray, Description: "Per-model / per-protocol policy overrides matched in order ({name, models, exclude_models, protocols, secrets, personal, kinds, words, rules, actions, allow, shape, block_terms, model})"},
 		},
