@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="{{.Locale}}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 {{if gt .RefreshSeconds 0}}<meta http-equiv="refresh" content="{{.RefreshSeconds}}">{{end}}
-<title>cpa-reductant 状态监控</title>
+<title>{{.T "page.title"}}</title>
 <style>
 /*__DASHBOARD_CSS__*/
 </style>
@@ -20,72 +20,75 @@
           <span class="badge badge-muted mono">v{{.Status.Version}}</span>
         </div>
         <div class="sub" style="margin-top:4px">
-          启动 <span class="mono">{{.Status.StartedAt}}</span> · 已运行 <span class="mono">{{.UptimeText}}</span>
-          {{if .Status.LastActivityAt}} · 最近请求 <span class="mono">{{.Status.LastActivityAt}}</span>{{else}} · 暂无请求{{end}}
-          {{if .Status.LastReconfiguredAt}} · 最近重载 <span class="mono">{{.Status.LastReconfiguredAt}}</span>{{end}}
+          <span class="mono">{{.Tf "header.started_at" "time" .Status.StartedAt}}</span> · <span class="mono">{{.Tf "header.uptime" "duration" .UptimeText}}</span>
+          {{if .Status.LastActivityAt}} · <span class="mono">{{.Tf "header.last_request" "time" .Status.LastActivityAt}}</span>{{else}} · {{.T "header.no_requests"}}{{end}}
+          {{if .Status.LastReconfiguredAt}} · <span class="mono">{{.Tf "header.last_reload" "time" .Status.LastReconfiguredAt}}</span>{{end}}
         </div>
       </div>
       <div class="actions">
+        <select id="lang-select" class="select" aria-label="{{.T "lang.label"}}" onchange="switchLang(this.value)">
+          {{range .Locales}}<option value="{{.Code}}"{{if eq .Code $.Locale}} selected{{end}}>{{.Label}}</option>{{end}}
+        </select>
         {{if gt .RefreshSeconds 0}}
-        <a class="btn active" href="{{.StopRefreshLink}}">停止自动刷新 ({{.RefreshSeconds}}s)</a>
+        <a class="btn active" href="{{.StopRefreshLink}}">{{.Tf "header.stop_auto_refresh" "sec" .RefreshSeconds}}</a>
         {{else}}
-        <a class="btn" href="{{.RefreshLink}}">5s 自动刷新</a>
+        <a class="btn" href="{{.RefreshLink}}">{{.Tf "header.start_auto_refresh" "sec" 5}}</a>
         {{end}}
-        <a class="btn" href="{{.BaseURL}}">刷新</a>
+        <a class="btn" href="{{.BaseURL}}">{{.T "header.refresh"}}</a>
         <a class="btn" href="{{.JSONURL}}" target="_blank" rel="noopener">JSON</a>
       </div>
     </div>
 
     <div class="chips">
-      <span class="chip"><strong>密钥脱敏:</strong> {{if .Status.Policy.Secrets}}开{{else}}关{{end}}</span>
-      <span class="chip"><strong>个人隐私:</strong> {{if .Status.Policy.Personal}}开{{else}}关{{end}}</span>
-      <span class="chip"><strong>词表:</strong> {{.Status.Policy.WordsCount}}</span>
-      <span class="chip"><strong>规则:</strong> {{.Status.Policy.RulesCount}}</span>
-      <span class="chip"><strong>白名单:</strong> {{.Status.Policy.AllowCount}}</span>
-      <span class="chip"><strong>替换形式:</strong> {{if .Status.Policy.Shape}}保形替换{{else}}占位符{{end}}</span>
-      <span class="chip"><strong>HMAC 密钥:</strong>
-        {{if not .Status.Policy.KeyPathConfigured}}临时（仅内存）
-        {{else if .Status.Policy.KeyPathActive}}已持久化
-        {{else}}异常{{end}}
+      <span class="chip"><strong>{{.T "policy.secrets"}}:</strong> {{if .Status.Policy.Secrets}}{{.T "policy.on"}}{{else}}{{.T "policy.off"}}{{end}}</span>
+      <span class="chip"><strong>{{.T "policy.personal"}}:</strong> {{if .Status.Policy.Personal}}{{.T "policy.on"}}{{else}}{{.T "policy.off"}}{{end}}</span>
+      <span class="chip"><strong>{{.T "policy.words"}}:</strong> {{.Status.Policy.WordsCount}}</span>
+      <span class="chip"><strong>{{.T "policy.rules"}}:</strong> {{.Status.Policy.RulesCount}}</span>
+      <span class="chip"><strong>{{.T "policy.allowlist"}}:</strong> {{.Status.Policy.AllowCount}}</span>
+      <span class="chip"><strong>{{.T "policy.replacement"}}:</strong> {{if .Status.Policy.Shape}}{{.T "policy.shape_preserving"}}{{else}}{{.T "policy.placeholder"}}{{end}}</span>
+      <span class="chip"><strong>{{.T "policy.hmac_key"}}:</strong>
+        {{if not .Status.Policy.KeyPathConfigured}}{{.T "policy.key_temporary"}}
+        {{else if .Status.Policy.KeyPathActive}}{{.T "policy.key_persisted"}}
+        {{else}}{{.T "policy.key_failed"}}{{end}}
       </span>
-      <span class="chip"><strong>PII 模型:</strong>
-        {{if not .Status.Model.Enabled}}未启用
-        {{else if .Status.Model.Loaded}}{{.Status.Model.Name}} · 已加载 ({{.Status.Model.Cores}} 核)
-        {{else if .Status.Model.Downloading}}{{.Status.Model.Name}} · 下载中 ({{printf "%.0f" .DownloadPercent}}%)
-        {{else if .Status.Model.Installed}}{{.Status.Model.Name}} · 就绪
-        {{else}}{{.Status.Model.Name}} · 缺失{{end}}
+      <span class="chip"><strong>{{.T "policy.model"}}:</strong>
+        {{if not .Status.Model.Enabled}}{{.T "model.disabled"}}
+        {{else if .Status.Model.Loaded}}{{.Status.Model.Name}} · {{.Tf "model.loaded" "count" .Status.Model.Cores}}
+        {{else if .Status.Model.Downloading}}{{.Status.Model.Name}} · {{.Tf "model.downloading" "percent" (printf "%.0f" .DownloadPercent)}}
+        {{else if .Status.Model.Installed}}{{.Status.Model.Name}} · {{.T "model.ready"}}
+        {{else}}{{.Status.Model.Name}} · {{.T "model.missing"}}{{end}}
       </span>
     </div>
-    {{if .Status.Policy.KeyPathError}}<div class="err-box">HMAC 密钥异常: {{.Status.Policy.KeyPathError}}</div>{{end}}
-    {{if .Status.Model.LastError}}<div class="err-box">模型错误: {{.Status.Model.LastError}}{{if .Status.Model.RetryAt}}（退避至 {{.Status.Model.RetryAt}}）{{end}}</div>{{end}}
-    {{if .Status.Model.DownloadError}}<div class="err-box">模型下载失败: {{.Status.Model.DownloadError}}</div>{{end}}
-    {{if .Status.Model.DiskCacheError}}<div class="err-box">磁盘缓存写入失败: {{.Status.Model.DiskCacheError}}</div>{{end}}
+    {{if .Status.Policy.KeyPathError}}<div class="err-box">{{.Tf "policy.key_error" "error" .Status.Policy.KeyPathError}}</div>{{end}}
+    {{if .Status.Model.LastError}}<div class="err-box">{{.Tf "model.error" "error" .Status.Model.LastError}}{{if .Status.Model.RetryAt}}{{.Tf "model.retry_at" "time" .Status.Model.RetryAt}}{{end}}</div>{{end}}
+    {{if .Status.Model.DownloadError}}<div class="err-box">{{.Tf "model.download_error" "error" .Status.Model.DownloadError}}</div>{{end}}
+    {{if .Status.Model.DiskCacheError}}<div class="err-box">{{.Tf "model.disk_cache_error" "error" .Status.Model.DiskCacheError}}</div>{{end}}
   </div>
 
   <div class="card" data-fold="model">
     <div class="card-head">
       <button class="fold-btn" type="button" aria-expanded="true">
         <span class="fold-arrow" aria-hidden="true"></span>
-        <span class="fold-label">本地 PII 模型 ({{.Status.Model.Name}}) <span class="sub">用于识别人名、地址、电话等语义实体</span></span>
+        <span class="fold-label">{{.T "model.title"}} ({{.Status.Model.Name}}) <span class="sub">{{.T "model.description"}}</span></span>
       </button>
       <span class="actions">
-        {{if not .Status.Model.Enabled}}<span class="badge badge-muted">未启用</span>
-        {{else if .Status.Model.Loaded}}<span class="badge badge-green">已加载 ({{.Status.Model.Cores}} 核)</span>
-        {{else if .Status.Model.Downloading}}<span class="badge badge-amber">下载中 ({{printf "%.0f" .DownloadPercent}}%)</span>
-        {{else if .Status.Model.Installed}}<span class="badge badge-blue">权重就绪</span>
-        {{else}}<span class="badge badge-amber">缺失权重</span>{{end}}
+        {{if not .Status.Model.Enabled}}<span class="badge badge-muted">{{.T "model.disabled"}}</span>
+        {{else if .Status.Model.Loaded}}<span class="badge badge-green">{{.Tf "model.loaded" "count" .Status.Model.Cores}}</span>
+        {{else if .Status.Model.Downloading}}<span class="badge badge-amber">{{.Tf "model.downloading" "percent" (printf "%.0f" .DownloadPercent)}}</span>
+        {{else if .Status.Model.Installed}}<span class="badge badge-blue">{{.T "model.weights_ready"}}</span>
+        {{else}}<span class="badge badge-amber">{{.T "model.weights_missing"}}</span>{{end}}
       </span>
     </div>
     <div class="card-body">
     <div class="kv-grid">
-      <div class="kv-item"><div class="kv-label">期望目录 (model.dir)</div><div class="kv-val">{{if .Status.Model.Dir}}{{.Status.Model.Dir}}{{else}}-{{end}}</div></div>
-      <div class="kv-item"><div class="kv-label">实际加载路径 / 布局</div><div class="kv-val">{{if .Status.Model.ResolvedDir}}{{.Status.Model.ResolvedDir}} ({{.Status.Model.Layout}}){{else}}{{.Status.Model.Layout}}{{end}}</div></div>
-      <div class="kv-item"><div class="kv-label">策略开关</div><div class="kv-val">enabled={{.Status.Model.Enabled}} · auto_download={{.Status.Model.AutoDownload}} · strict={{.Status.Model.Strict}}</div></div>
-      <div class="kv-item"><div class="kv-label">阈值 / 超时 / 版本</div><div class="kv-val">min_score={{.Status.Model.MinScore}} · wait={{.Status.Model.WaitMS}}ms · rev={{.Status.Model.Revision}}</div></div>
+      <div class="kv-item"><div class="kv-label">{{.T "model.expected_dir"}}</div><div class="kv-val">{{if .Status.Model.Dir}}{{.Status.Model.Dir}}{{else}}-{{end}}</div></div>
+      <div class="kv-item"><div class="kv-label">{{.T "model.loaded_path"}}</div><div class="kv-val">{{if .Status.Model.ResolvedDir}}{{.Status.Model.ResolvedDir}} ({{.Status.Model.Layout}}){{else}}{{.Status.Model.Layout}}{{end}}</div></div>
+      <div class="kv-item"><div class="kv-label">{{.T "model.settings"}}</div><div class="kv-val">enabled={{.Status.Model.Enabled}} · auto_download={{.Status.Model.AutoDownload}} · strict={{.Status.Model.Strict}}</div></div>
+      <div class="kv-item"><div class="kv-label">{{.T "model.parameters"}}</div><div class="kv-val">min_score={{.Status.Model.MinScore}} · wait={{.Status.Model.WaitMS}}ms · rev={{.Status.Model.Revision}}</div></div>
     </div>
     {{if .Status.Model.Downloading}}
     <div style="margin-top:10px">
-      <div class="bar-head"><span class="sub">正在拉取权重</span><span class="mono">{{fmtBytes64 .Status.Model.DownloadDone}} / {{fmtBytes64 .Status.Model.DownloadTotal}} ({{printf "%.1f" .DownloadPercent}}%)</span></div>
+      <div class="bar-head"><span class="sub">{{.T "model.fetching"}}</span><span class="mono">{{fmtBytes64 .Status.Model.DownloadDone}} / {{fmtBytes64 .Status.Model.DownloadTotal}} ({{printf "%.1f" .DownloadPercent}}%)</span></div>
       <div class="bar-track" style="margin-top:4px"><div class="bar-fill" style="width:{{printf "%.1f" .DownloadPercent}}%"></div></div>
     </div>
     {{end}}
@@ -94,56 +97,56 @@
 
   <div class="grid-4">
     <div class="card">
-      <div class="kpi-label">请求处理</div>
+      <div class="kpi-label">{{.T "kpi.requests"}}</div>
       <div class="kpi-val">{{.Status.Stats.RequestsTotal}}</div>
       <div class="kpi-meta">
-        <span>脱敏 <strong>{{.Status.Stats.RequestsMasked}}</strong> ({{.FilterRate}})</span>
-        <span>拦截 <strong>{{.Status.Stats.RequestsBlocked}}</strong> ({{.BlockRate}})</span>
-        <span>告警 <strong>{{.Status.Stats.RequestsWarned}}</strong></span>
+        <span>{{.T "kpi.masked"}} <strong>{{.Status.Stats.RequestsMasked}}</strong> ({{.FilterRate}})</span>
+        <span>{{.T "kpi.blocked"}} <strong>{{.Status.Stats.RequestsBlocked}}</strong> ({{.BlockRate}})</span>
+        <span>{{.T "kpi.warned"}} <strong>{{.Status.Stats.RequestsWarned}}</strong></span>
       </div>
       <div class="kpi-meta">
-        <span>平均 <strong>{{fmtMS .Status.Stats.MaskLatency.AvgMS}}</strong></span>
+        <span>{{.T "kpi.average"}} <strong>{{fmtMS .Status.Stats.MaskLatency.AvgMS}}</strong></span>
         <span>P95 <strong>{{fmtMS .Status.Stats.MaskLatency.P95MS}}</strong></span>
       </div>
     </div>
 
     <div class="card">
-      <div class="kpi-label">敏感命中</div>
+      <div class="kpi-label">{{.T "kpi.hits"}}</div>
       <div class="kpi-val">{{.Status.Stats.HitsTotal}}</div>
       <div class="kpi-meta">
-        <span>脱敏替换 <strong>{{.Status.Stats.HitsMasked}}</strong></span>
-        <span>告警放行 <strong>{{.Status.Stats.HitsWarned}}</strong></span>
-        <span>拒绝拦截 <strong>{{.Status.Stats.HitsBlocked}}</strong></span>
+        <span>{{.T "kpi.hits_masked"}} <strong>{{.Status.Stats.HitsMasked}}</strong></span>
+        <span>{{.T "kpi.hits_warned"}} <strong>{{.Status.Stats.HitsWarned}}</strong></span>
+        <span>{{.T "kpi.hits_blocked"}} <strong>{{.Status.Stats.HitsBlocked}}</strong></span>
       </div>
     </div>
 
     <div class="card">
-      <div class="kpi-label">响应还原</div>
-      <div class="kpi-val">{{.Status.Stats.PlaceholdersRestored}} <span class="sub">次</span></div>
+      <div class="kpi-label">{{.T "kpi.restore"}}</div>
+      <div class="kpi-val">{{.Tf "kpi.restored_count" "count" .Status.Stats.PlaceholdersRestored}}</div>
       <div class="kpi-meta">
         <span>JSON <strong>{{.Status.Stats.ResponsesRestored}}/{{.Status.Stats.ResponsesTotal}}</strong></span>
-        <span>SSE 流 <strong>{{.Status.Stats.StreamsRestored}}/{{.Status.Stats.StreamsTotal}}</strong></span>
-        {{if gt .Status.Stats.StreamsFailed 0}}<span style="color:var(--red)">流失败 <strong>{{.Status.Stats.StreamsFailed}}</strong></span>{{end}}
+        <span>{{.T "kpi.streams"}} <strong>{{.Status.Stats.StreamsRestored}}/{{.Status.Stats.StreamsTotal}}</strong></span>
+        {{if gt .Status.Stats.StreamsFailed 0}}<span style="color:var(--red)">{{.T "kpi.streams_failed"}} <strong>{{.Status.Stats.StreamsFailed}}</strong></span>{{end}}
       </div>
       <div class="kpi-meta">
-        <span>平均 <strong>{{fmtMS .Status.Stats.RestoreLatency.AvgMS}}</strong></span>
+        <span>{{.T "kpi.average"}} <strong>{{fmtMS .Status.Stats.RestoreLatency.AvgMS}}</strong></span>
         <span>P95 <strong>{{fmtMS .Status.Stats.RestoreLatency.P95MS}}</strong></span>
       </div>
     </div>
 
     <div class="card">
-      <div class="kpi-label">流量与缓存</div>
-      <div class="kpi-val">{{.BytesInText}} <span class="sub">入站</span></div>
+      <div class="kpi-label">{{.T "kpi.traffic_cache"}}</div>
+      <div class="kpi-val">{{.BytesInText}} <span class="sub">{{.T "kpi.inbound"}}</span></div>
       <div class="kpi-meta">
-        <span>出站 <strong>{{.BytesOutText}}</strong></span>
-        <span>缓存 <strong>{{.Status.Model.CacheEntries}}</strong> 条</span>
-        <span>命中率 <strong>{{.CacheHitRate}}</strong></span>
+        <span>{{.T "kpi.outbound"}} <strong>{{.BytesOutText}}</strong></span>
+        <span><strong>{{.Tf "kpi.cache_entries" "count" .Status.Model.CacheEntries}}</strong></span>
+        <span>{{.T "kpi.cache_hit_rate"}} <strong>{{.CacheHitRate}}</strong></span>
       </div>
       {{if .Status.Model.Enabled}}
       <div class="kpi-meta">
-        <span>推理平均 <strong>{{fmtMS .Status.Model.InferLatency.AvgMS}}</strong></span>
-        <span>降级 <strong>{{.Status.Model.PartialTimeouts}}</strong></span>
-        <span>排队 <strong>{{.Status.Model.Waiting}}</strong></span>
+        <span>{{.T "kpi.inference_average"}} <strong>{{fmtMS .Status.Model.InferLatency.AvgMS}}</strong></span>
+        <span>{{.T "kpi.degraded"}} <strong>{{.Status.Model.PartialTimeouts}}</strong></span>
+        <span>{{.T "kpi.queued"}} <strong>{{.Status.Model.Waiting}}</strong></span>
       </div>
       {{end}}
     </div>
@@ -154,7 +157,7 @@
       <div class="card-head">
         <button class="fold-btn" type="button" aria-expanded="true">
           <span class="fold-arrow" aria-hidden="true"></span>
-          <span class="fold-label">命中类别 <span class="sub">按脱敏类型</span></span>
+          <span class="fold-label">{{.T "kind.title"}} <span class="sub">{{.T "kind.description"}}</span></span>
         </button>
       </div>
       <div class="card-body">
@@ -171,7 +174,7 @@
         {{end}}
       </div>
       {{else}}
-      <div class="empty">暂无命中记录</div>
+      <div class="empty">{{.T "kind.empty"}}</div>
       {{end}}
       </div>
     </div>
@@ -180,7 +183,7 @@
       <div class="card-head">
         <button class="fold-btn" type="button" aria-expanded="true">
           <span class="fold-arrow" aria-hidden="true"></span>
-          <span class="fold-label">检出方式 <span class="sub">按识别来源</span></span>
+          <span class="fold-label">{{.T "finder.title"}} <span class="sub">{{.T "finder.description"}}</span></span>
         </button>
       </div>
       <div class="card-body">
@@ -197,7 +200,7 @@
         {{end}}
       </div>
       {{else}}
-      <div class="empty">暂无检出记录</div>
+      <div class="empty">{{.T "finder.empty"}}</div>
       {{end}}
       </div>
     </div>
@@ -208,13 +211,13 @@
       <div class="card-head">
         <button class="fold-btn" type="button" aria-expanded="true">
           <span class="fold-arrow" aria-hidden="true"></span>
-          <span class="fold-label">协议统计</span>
+          <span class="fold-label">{{.T "table.protocol_title"}}</span>
         </button>
       </div>
       <div class="card-body">
       {{if .ProtocolRows}}
       <table>
-        <thead><tr><th>协议</th><th>请求</th><th>脱敏 / 拦截</th><th>命中</th><th>还原</th><th>入站</th></tr></thead>
+        <thead><tr><th>{{.T "table.protocol"}}</th><th>{{.T "table.requests"}}</th><th>{{.T "table.masked_blocked"}}</th><th>{{.T "table.hits"}}</th><th>{{.T "table.restored"}}</th><th>{{.T "table.inbound"}}</th></tr></thead>
         <tbody>
           {{range .ProtocolRows}}
           <tr>
@@ -229,7 +232,7 @@
         </tbody>
       </table>
       {{else}}
-      <div class="empty">暂无请求数据</div>
+      <div class="empty">{{.T "table.protocol_empty"}}</div>
       {{end}}
       </div>
     </div>
@@ -238,13 +241,13 @@
       <div class="card-head">
         <button class="fold-btn" type="button" aria-expanded="true">
           <span class="fold-arrow" aria-hidden="true"></span>
-          <span class="fold-label">模型统计</span>
+          <span class="fold-label">{{.T "table.model_title"}}</span>
         </button>
       </div>
       <div class="card-body">
       {{if .ModelRows}}
       <table>
-        <thead><tr><th>模型</th><th>请求</th><th>脱敏 / 拦截</th><th>命中</th><th>还原</th><th>入站</th></tr></thead>
+        <thead><tr><th>{{.T "table.model"}}</th><th>{{.T "table.requests"}}</th><th>{{.T "table.masked_blocked"}}</th><th>{{.T "table.hits"}}</th><th>{{.T "table.restored"}}</th><th>{{.T "table.inbound"}}</th></tr></thead>
         <tbody>
           {{range .ModelRows}}
           <tr>
@@ -259,7 +262,7 @@
         </tbody>
       </table>
       {{else}}
-      <div class="empty">暂无模型数据</div>
+      <div class="empty">{{.T "table.model_empty"}}</div>
       {{end}}
       </div>
     </div>
@@ -269,16 +272,16 @@
     <div class="card-head">
       <button class="fold-btn" type="button" aria-expanded="true">
         <span class="fold-arrow" aria-hidden="true"></span>
-        <span class="fold-label">最近过滤记录 <span class="sub">仅保留前缀提示与占位符，不保存明文 · 共 {{len .Status.RecentEvents}} 条</span></span>
+        <span class="fold-label">{{.T "events.title"}} <span class="sub">{{.T "events.privacy_notice"}} · {{.Tf "events.count" "count" (len .Status.RecentEvents)}}</span></span>
       </button>
       <span class="actions">
-        <a class="btn {{if eq .ActionFilter ""}}active{{end}}" href="{{.BaseURL}}" onclick="setCardFold('events',false)">全部</a>
-        <a class="btn {{if eq .ActionFilter "mask"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=mask" onclick="setCardFold('events',false)">脱敏</a>
-        <a class="btn {{if eq .ActionFilter "warn"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=warn" onclick="setCardFold('events',false)">告警</a>
-        <a class="btn {{if eq .ActionFilter "block"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=block" onclick="setCardFold('events',false)">拦截</a>
-        <a class="btn {{if eq .ActionFilter "restore"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=restore" onclick="setCardFold('events',false)">还原</a>
-        <a class="btn {{if eq .ActionFilter "passthrough"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=passthrough" onclick="setCardFold('events',false)">放行</a>
-        <a class="btn {{if eq .ActionFilter "error"}}active{{end}}" href="{{.BaseURL}}{{if containsQ .BaseURL}}&amp;{{else}}?{{end}}action=error" onclick="setCardFold('events',false)">错误</a>
+        <a class="btn {{if eq .ActionFilter ""}}active{{end}}" href="{{.ActionHref ""}}" onclick="setCardFold('events',false)">{{.T "events.all"}}</a>
+        <a class="btn {{if eq .ActionFilter "mask"}}active{{end}}" href="{{.ActionHref "mask"}}" onclick="setCardFold('events',false)">{{.ActionLabel "mask"}}</a>
+        <a class="btn {{if eq .ActionFilter "warn"}}active{{end}}" href="{{.ActionHref "warn"}}" onclick="setCardFold('events',false)">{{.ActionLabel "warn"}}</a>
+        <a class="btn {{if eq .ActionFilter "block"}}active{{end}}" href="{{.ActionHref "block"}}" onclick="setCardFold('events',false)">{{.ActionLabel "block"}}</a>
+        <a class="btn {{if eq .ActionFilter "restore"}}active{{end}}" href="{{.ActionHref "restore"}}" onclick="setCardFold('events',false)">{{.ActionLabel "restore"}}</a>
+        <a class="btn {{if eq .ActionFilter "passthrough"}}active{{end}}" href="{{.ActionHref "passthrough"}}" onclick="setCardFold('events',false)">{{.ActionLabel "passthrough"}}</a>
+        <a class="btn {{if eq .ActionFilter "error"}}active{{end}}" href="{{.ActionHref "error"}}" onclick="setCardFold('events',false)">{{.ActionLabel "error"}}</a>
       </span>
     </div>
     <div class="card-body">
@@ -287,20 +290,20 @@
       <table>
         <thead>
           <tr>
-            <th>时间</th>
-            <th>阶段</th>
-            <th>处理</th>
-            <th>协议 / 模型</th>
-            <th>大小 / 耗时</th>
-            <th>详情</th>
+            <th>{{.T "events.time"}}</th>
+            <th>{{.T "events.phase"}}</th>
+            <th>{{.T "events.action"}}</th>
+            <th>{{.T "events.protocol_model"}}</th>
+            <th>{{.T "events.size_duration"}}</th>
+            <th>{{.T "events.details"}}</th>
           </tr>
         </thead>
         <tbody>
           {{range .Status.RecentEvents}}
           <tr>
             <td class="mono" title="{{.Timestamp}}">#{{.ID}} {{shortTime .Timestamp}}</td>
-            <td class="mono">{{phaseLabel .Phase}}</td>
-            <td><span class="badge {{actionClass .Action}}">{{actionLabel .Action}}</span></td>
+            <td class="mono">{{$.PhaseLabel .Phase}}</td>
+            <td><span class="badge {{actionClass .Action}}">{{$.ActionLabel .Action}}</span></td>
             <td class="mono">{{if .Protocol}}{{.Protocol}}{{else}}-{{end}}{{if .Model}} / {{.Model}}{{end}}</td>
             <td class="mono">{{fmtBytes .Bytes}} · {{fmtMS .DurationMS}}</td>
             <td>
@@ -310,18 +313,18 @@
                 <span class="hit-pill {{.Action}}">
                   <strong>{{.Kind}}</strong>
                   {{if .By}}<span>[{{.By}}]</span>{{end}}
-                  {{if .Head}}<span>{{.Head}}*** ({{.Len}} 字符)</span>{{else if gt .Len 0}}<span>({{.Len}} 字符)</span>{{end}}
+                  {{if .Head}}<span>{{.Head}}*** ({{$.Tf "common.character_count" "count" .Len}})</span>{{else if gt .Len 0}}<span>({{$.Tf "common.character_count" "count" .Len}})</span>{{end}}
                   {{if .Placeholder}}<span>→ {{.Placeholder}}</span>{{end}}
-                  {{if ne .Action "mask"}}<span>({{actionLabel .Action}})</span>{{end}}
+                  {{if ne .Action "mask"}}<span>({{$.ActionLabel .Action}})</span>{{end}}
                 </span>
                 {{end}}
               </div>
               {{else if gt .RestoredCount 0}}
-              <span class="badge badge-green">还原 {{.RestoredCount}} 处占位符</span>
+              <span class="badge badge-green">{{$.Tf "events.restored" "count" .RestoredCount}}</span>
               {{else if .Error}}
               <span style="color:var(--red)" class="mono">{{.Error}}</span>
               {{else}}
-              <span class="sub">无敏感命中，原样转发</span>
+              <span class="sub">{{$.T "events.no_hits"}}</span>
               {{end}}
             </td>
           </tr>
@@ -330,7 +333,7 @@
       </table>
     </div>
     {{else}}
-    <div class="empty">暂无记录</div>
+    <div class="empty">{{.T "common.empty"}}</div>
     {{end}}
     </div>
   </div>
@@ -339,25 +342,25 @@
     <div class="card-head">
       <button class="fold-btn" type="button" aria-expanded="true">
         <span class="fold-arrow" aria-hidden="true"></span>
-        <span class="fold-label">调试抓包 <span class="sub">临时内存开关（支持 TTL 自动关闭），对比原始请求、脱敏报文与响应还原</span></span>
+        <span class="fold-label">{{.T "capture.title"}} <span class="sub">{{.T "capture.description"}}</span></span>
       </button>
       <span class="actions">
-        <span id="cap-badge" class="badge badge-muted">未加载</span>
-        <select id="cap-ttl" class="select" title="抓包有效期">
-          <option value="60">1 分钟</option>
-          <option value="300" selected>5 分钟</option>
-          <option value="900">15 分钟</option>
-          <option value="1800">30 分钟</option>
+        <span id="cap-badge" class="badge badge-muted">{{.T "capture.not_loaded"}}</span>
+        <select id="cap-ttl" class="select" title="{{.T "capture.ttl"}}">
+          <option value="60">{{.Tf "capture.ttl_minutes" "count" 1}}</option>
+          <option value="300" selected>{{.Tf "capture.ttl_minutes" "count" 5}}</option>
+          <option value="900">{{.Tf "capture.ttl_minutes" "count" 15}}</option>
+          <option value="1800">{{.Tf "capture.ttl_minutes" "count" 30}}</option>
         </select>
-        <button id="cap-toggle-btn" class="btn" type="button" onclick="toggleCapture()">开启抓包</button>
-        <button class="btn" type="button" onclick="loadCapture(true)">刷新抓包</button>
-        <button class="btn" type="button" onclick="clearCapture()">清空记录</button>
+        <button id="cap-toggle-btn" class="btn" type="button" onclick="toggleCapture()">{{.T "capture.start"}}</button>
+        <button class="btn" type="button" onclick="loadCapture(true)">{{.T "capture.refresh"}}</button>
+        <button class="btn" type="button" onclick="clearCapture()">{{.T "capture.clear"}}</button>
       </span>
     </div>
     <div class="card-body">
-    <div class="sub">curl 接口：<span class="mono">{{.DebugCaptureURL}}</span></div>
+    <div class="sub"><span class="mono">{{.Tf "capture.curl_endpoint" "endpoint" .DebugCaptureURL}}</span></div>
     <div id="cap-err" class="err-box" style="display:none"></div>
-    <div id="cap-list" class="cap-list"><div class="empty">点击「刷新抓包」或「开启抓包」加载调试捕获</div></div>
+    <div id="cap-list" class="cap-list"><div class="empty">{{.Tf "capture.initial_hint" "refresh" (.T "capture.refresh") "start" (.T "capture.start")}}</div></div>
     </div>
   </div>
 
@@ -365,13 +368,13 @@
     <div class="card-head">
       <button class="fold-btn" type="button" aria-expanded="true">
         <span class="fold-arrow" aria-hidden="true"></span>
-        <span class="fold-label">脱敏预览 <span class="sub">只读测试，不计入统计或还原映射</span></span>
+        <span class="fold-label">{{.T "preview.title"}} <span class="sub">{{.T "preview.description"}}</span></span>
       </button>
     </div>
     <div class="card-body">
-    <textarea id="preview-input" placeholder="输入测试文本（例如：Authorization: Bearer sk-ant-api03-example1234567890, contact alice@example.com）"></textarea>
+    <textarea id="preview-input" placeholder="{{.T "preview.placeholder"}}"></textarea>
     <div class="actions" style="margin-top:8px">
-      <button class="btn" type="button" onclick="runPreview()">测试</button>
+      <button class="btn" type="button" onclick="runPreview()">{{.T "preview.test"}}</button>
       <span id="preview-meta" class="sub"></span>
     </div>
     <div id="preview-out" class="preview-out"></div>
@@ -379,6 +382,19 @@
   </div>
 </div>
 <script>
+var I18N = {{.MessagesJSON}};
+function t(key, vars){
+  return (I18N[key] || key).replace(/\{(\w+)\}/g, function(match, name){
+    return vars && vars[name] != null ? vars[name] : match;
+  });
+}
+function switchLang(lang){
+  document.cookie = {{.LangCookieName}} + '=' + encodeURIComponent(lang) + '; path=/; max-age=31536000; SameSite=Lax';
+  try{ localStorage.setItem({{.LangCookieName}}, lang); }catch(_){}
+  var url = new URL(window.location.href);
+  url.searchParams.set('lang', lang);
+  window.location.href = url.toString();
+}
 var capState = { enabled: false, openIDs: {} };
 function escCap(v){
   return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
@@ -389,60 +405,64 @@ function prettyCap(s){
 }
 function renderCaptureSnap(snap){
   capState.enabled = !!snap.enabled;
+  var entries = snap.entries || [];
   var badge = document.getElementById('cap-badge');
   var btn = document.getElementById('cap-toggle-btn');
   if(snap.enabled){
     badge.className = 'badge badge-amber';
-    badge.textContent = '抓包中 · 剩余 ' + (snap.remaining_seconds || 0) + 's';
+    badge.textContent = t('capture.remaining', {sec: snap.remaining_seconds || 0});
     btn.className = 'btn active';
-    btn.textContent = '停止抓包';
+    btn.textContent = t('capture.stop');
   }else{
     badge.className = 'badge badge-muted';
-    badge.textContent = '已关闭 · 缓存 ' + (snap.entries ? snap.entries.length : 0) + ' 条';
+    badge.textContent = t('capture.cached', {count: entries.length});
     btn.className = 'btn';
-    btn.textContent = '开启抓包';
+    btn.textContent = t('capture.start');
   }
   var list = document.getElementById('cap-list');
-  var entries = snap.entries || [];
   if(!entries.length){
-    list.innerHTML = '<div class="empty">' + (snap.enabled ? '抓包已开启，等待新请求...' : '暂无抓包记录') + '</div>';
+    list.innerHTML = '<div class="empty">' + escCap(snap.enabled ? t('capture.waiting') : t('capture.empty')) + '</div>';
     return;
   }
   list.innerHTML = entries.map(function(ev){
     var openAttr = capState.openIDs[ev.id] ? ' open' : '';
     var reps = ev.replacements || [];
     var restored = ev.restored_items || [];
-    var repHtml = reps.length ? ('<table><thead><tr><th>原文</th><th>替换值 / 占位符</th><th>类型</th><th>方式</th><th>动作</th></tr></thead><tbody>' +
+    var repHtml = reps.length ? ('<table><thead><tr><th>' + escCap(t('capture.original')) + '</th><th>' + escCap(t('capture.replacement')) + '</th><th>' + escCap(t('capture.kind')) + '</th><th>' + escCap(t('capture.finder')) + '</th><th>' + escCap(t('capture.action')) + '</th></tr></thead><tbody>' +
       reps.map(function(r){
-        var orig = r.original ? '<span class="orig-val">' + escCap(r.original) + '</span>' : '<span class="sub">(未替换 · 仅告警)</span>';
-        return '<tr><td class="mono">' + orig + '</td><td class="mono ph-val">' + escCap(r.placeholder || '-') + '</td><td class="mono">' + escCap(r.kind) + '</td><td class="mono">' + escCap(r.by || '-') + '</td><td class="mono">' + escCap(r.action || 'mask') + '</td></tr>';
-      }).join('') + '</tbody></table>') : '<div class="sub">请求阶段无敏感替换</div>';
-    var resHtml = restored.length ? ('<table><thead><tr><th>占位符</th><th>还原原文</th><th>次数</th></tr></thead><tbody>' +
+        var orig = r.original ? '<span class="orig-val">' + escCap(r.original) + '</span>' : '<span class="sub">' + escCap(t('capture.warn_only')) + '</span>';
+        return '<tr><td class="mono">' + orig + '</td><td class="mono ph-val">' + escCap(r.placeholder || '-') + '</td><td class="mono">' + escCap(r.kind) + '</td><td class="mono">' + escCap(r.by || '-') + '</td><td class="mono">' + escCap(t('action.' + (r.action || 'mask'))) + '</td></tr>';
+      }).join('') + '</tbody></table>') : '<div class="sub">' + escCap(t('capture.no_replacements')) + '</div>';
+    var resHtml = restored.length ? ('<table><thead><tr><th>' + escCap(t('capture.placeholder')) + '</th><th>' + escCap(t('capture.restored_text')) + '</th><th>' + escCap(t('capture.occurrences')) + '</th></tr></thead><tbody>' +
       restored.map(function(r){
         return '<tr><td class="mono ph-val">' + escCap(r.placeholder) + '</td><td class="mono orig-val">' + escCap(r.original || '-') + '</td><td class="mono">' + (r.count || 0) + '</td></tr>';
       }).join('') + '</tbody></table>') : '';
     var statusBadge = '';
-    if(ev.status === 'streaming') statusBadge = '<span class="badge badge-amber">流式传输中</span>';
-    else if(ev.status === 'pending') statusBadge = '<span class="badge badge-muted">等待响应</span>';
-    else if(ev.status === 'error') statusBadge = '<span class="badge badge-red">异常</span>';
-    var upText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + (ev.upstream_response_bytes || 0) + ' B]') : (prettyCap(ev.upstream_response) || (ev.status === 'streaming' ? '[流式传输中，等待数据...]' : ''));
-    var reText = ev.response_binary ? ('[二进制响应 ' + (ev.response_content_type || '') + ', ' + (ev.restored_response_bytes || 0) + ' B]') : (prettyCap(ev.restored_response) || (ev.status === 'streaming' ? '[流式传输中，等待输出...]' : ''));
+    if(ev.status === 'streaming') statusBadge = '<span class="badge badge-amber">' + escCap(t('capture.streaming')) + '</span>';
+    else if(ev.status === 'pending') statusBadge = '<span class="badge badge-muted">' + escCap(t('capture.pending')) + '</span>';
+    else if(ev.status === 'error') statusBadge = '<span class="badge badge-red">' + escCap(t('capture.failed')) + '</span>';
+    var upText = ev.response_binary
+      ? t('capture.binary_response', {content_type: ev.response_content_type || '', size: (ev.upstream_response_bytes || 0) + ' B'})
+      : prettyCap(ev.upstream_response) || (ev.status === 'streaming' ? t('capture.waiting_for_data') : '');
+    var reText = ev.response_binary
+      ? t('capture.binary_response', {content_type: ev.response_content_type || '', size: (ev.restored_response_bytes || 0) + ' B'})
+      : prettyCap(ev.restored_response) || (ev.status === 'streaming' ? t('capture.waiting_for_output') : '');
     return '<details class="cap-item" data-cap-id="' + ev.id + '"' + openAttr + '>' +
       '<summary class="cap-summary">' +
         '<span class="mono"><strong>#' + ev.id + '</strong> ' + escCap(ev.timestamp) + ' · ' + escCap(ev.protocol || '-') + (ev.model ? ' / ' + escCap(ev.model) : '') + (ev.stream ? ' [SSE]' : '') + '</span>' +
-        '<span class="actions">' + statusBadge + '<span class="badge badge-blue">' + escCap(ev.action) + '</span><span class="sub mono">替换 ' + reps.length + ' · 还原 ' + (ev.restored_count || 0) + '</span></span>' +
+        '<span class="actions">' + statusBadge + '<span class="badge badge-blue">' + escCap(t('action.' + ev.action)) + '</span><span class="sub mono">' + escCap(t('capture.summary', {replaced: reps.length, restored: ev.restored_count || 0})) + '</span></span>' +
       '</summary>' +
       '<div class="cap-body">' +
-        (ev.error ? '<div class="err-box">' + escCap(ev.error) + '</div>' : '') +
-        '<div><div class="diff-title"><span>请求替换明细 (' + reps.length + ')</span></div>' + repHtml + '</div>' +
-        (resHtml ? '<div><div class="diff-title"><span>响应还原明细 (' + (ev.restored_count || 0) + ')</span></div>' + resHtml + '</div>' : '') +
+        (ev.error ? '<div class="err-box">' + escCap(t('common.error', {error: ev.error})) + '</div>' : '') +
+        '<div><div class="diff-title"><span>' + escCap(t('capture.request_details', {count: reps.length})) + '</span></div>' + repHtml + '</div>' +
+        (resHtml ? '<div><div class="diff-title"><span>' + escCap(t('capture.response_details', {count: ev.restored_count || 0})) + '</span></div>' + resHtml + '</div>' : '') +
         '<div class="diff-grid">' +
-          '<div class="diff-pane"><div class="diff-title"><span>原始请求 (Raw)</span><span class="mono">' + (ev.raw_request_bytes || 0) + ' B' + (ev.raw_request_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + escCap(prettyCap(ev.raw_request)) + '</pre></div>' +
-          '<div class="diff-pane"><div class="diff-title"><span>脱敏请求 (Masked → 上游)</span><span class="mono">' + (ev.masked_request_bytes || 0) + ' B' + (ev.masked_request_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + escCap(prettyCap(ev.masked_request)) + '</pre></div>' +
+          '<div class="diff-pane"><div class="diff-title"><span>' + escCap(t('capture.raw_request')) + '</span><span class="mono">' + (ev.raw_request_bytes || 0) + ' B' + (ev.raw_request_truncated ? ' · ' + escCap(t('capture.truncated')) : '') + '</span></div><pre class="code-box">' + escCap(prettyCap(ev.raw_request)) + '</pre></div>' +
+          '<div class="diff-pane"><div class="diff-title"><span>' + escCap(t('capture.masked_request')) + '</span><span class="mono">' + (ev.masked_request_bytes || 0) + ' B' + (ev.masked_request_truncated ? ' · ' + escCap(t('capture.truncated')) : '') + '</span></div><pre class="code-box">' + escCap(prettyCap(ev.masked_request)) + '</pre></div>' +
         '</div>' +
         '<div class="diff-grid">' +
-          '<div class="diff-pane"><div class="diff-title"><span>上游原始响应 (Upstream)</span><span class="mono">' + (ev.upstream_response_bytes || 0) + ' B' + (ev.upstream_response_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + escCap(upText) + '</pre></div>' +
-          '<div class="diff-pane"><div class="diff-title"><span>还原后响应 (Restored → 客户端)</span><span class="mono">' + (ev.restored_response_bytes || 0) + ' B' + (ev.restored_response_truncated ? ' · 已截断' : '') + '</span></div><pre class="code-box">' + escCap(reText) + '</pre></div>' +
+          '<div class="diff-pane"><div class="diff-title"><span>' + escCap(t('capture.upstream_response')) + '</span><span class="mono">' + (ev.upstream_response_bytes || 0) + ' B' + (ev.upstream_response_truncated ? ' · ' + escCap(t('capture.truncated')) : '') + '</span></div><pre class="code-box">' + escCap(upText) + '</pre></div>' +
+          '<div class="diff-pane"><div class="diff-title"><span>' + escCap(t('capture.restored_response')) + '</span><span class="mono">' + (ev.restored_response_bytes || 0) + ' B' + (ev.restored_response_truncated ? ' · ' + escCap(t('capture.truncated')) : '') + '</span></div><pre class="code-box">' + escCap(reText) + '</pre></div>' +
         '</div>' +
       '</div></details>';
   }).join('');
@@ -459,17 +479,17 @@ async function callCapture(method, body){
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
     }
-    var resp = await fetch('{{.DebugCaptureURL}}', opts);
+    var resp = await fetch({{.DebugCaptureURL}}, opts);
     var data = await resp.json();
     if(!resp.ok){
       errEl.style.display = 'block';
-      errEl.textContent = '错误: ' + (data.error || resp.status);
+      errEl.textContent = t('common.error', {error: data.error || resp.status});
       return;
     }
     renderCaptureSnap(data);
   }catch(e){
     errEl.style.display = 'block';
-    errEl.textContent = '请求失败: ' + e;
+    errEl.textContent = t('capture.request_failed', {error: e});
   }
 }
 function loadCapture(unfold){
@@ -487,13 +507,14 @@ function clearCapture(){
   return callCapture('DELETE');
 }
 async function runPreview(){
+  var previewURL = {{.PreviewURL}};
   var input=document.getElementById('preview-input').value;
   var out=document.getElementById('preview-out');
   var meta=document.getElementById('preview-meta');
   if(!input){return;}
-  meta.textContent='处理中...';
+  meta.textContent=t('preview.processing');
   try{
-    var resp=await fetch('{{.PreviewURL}}',{
+    var resp=await fetch(previewURL,{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({text:input})
@@ -501,19 +522,20 @@ async function runPreview(){
     var data=await resp.json();
     if(!resp.ok){
       out.style.display='block';
-      out.textContent='错误: '+(data.error||resp.status);
+      out.textContent=t('common.error', {error: data.error || resp.status});
       meta.textContent='';
       return;
     }
     out.style.display='block';
-    var hits=(data.hits||[]).map(function(h){
-      return '- '+h.Kind+' ['+(h.By||'-')+'] '+(h.Action||'mask')+' '+(h.Head?h.Head+'*** ':'')+'('+h.Len+' 字符) -> '+(h.Placeholder||'');
+    var hitsList=data.hits||[];
+    var hits=hitsList.map(function(h){
+      return '- '+h.Kind+' ['+(h.By||'-')+'] '+t('action.' + (h.Action || 'mask'))+' '+(h.Head?h.Head+'*** ':'')+'('+t('common.character_count', {count: h.Len})+') -> '+(h.Placeholder||'');
     }).join('\n');
-    out.textContent='脱敏结果：\n'+data.masked+(hits?'\n\n命中列表：\n'+hits:'\n\n命中列表：\n无');
-    meta.textContent='耗时 '+data.duration_ms+' ms · 命中 '+(data.hits?data.hits.length:0)+' 项';
+    out.textContent=t('preview.result')+'\n'+data.masked+'\n\n'+t('preview.hits')+'\n'+(hits||t('preview.no_hits'));
+    meta.textContent=t('preview.metrics', {ms: data.duration_ms, count: hitsList.length});
   }catch(e){
     out.style.display='block';
-    out.textContent='请求失败（若当前环境未自动携带管理鉴权头，请通过管理端或 curl 调用 /preview）: '+e;
+    out.textContent=t('preview.request_failed_help', {endpoint: previewURL, error: e});
     meta.textContent='';
   }
 }

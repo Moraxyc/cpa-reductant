@@ -14,6 +14,15 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
+var (
+	//go:embed assets/dashboard.css
+	dashboardCSS string
+	//go:embed assets/dashboard.html
+	dashboardHTML string
+	//go:embed assets/portal.html
+	portalHTML string
+)
+
 type uiBarItem struct {
 	Label   string
 	Count   int64
@@ -53,6 +62,45 @@ type uiViewData struct {
 	RefreshSeconds  int
 	RefreshLink     string
 	StopRefreshLink string
+
+	Locale         string
+	Locales        []localeOption
+	LangCookieName string
+	MessagesJSON   template.JS
+
+	rawBaseURL   string
+	explicitLang string
+	tr           translator
+}
+
+func (d uiViewData) T(key string) string {
+	return d.tr.T(key)
+}
+
+func (d uiViewData) Tf(key string, kv ...any) string {
+	return d.tr.Tf(key, kv...)
+}
+
+func (d uiViewData) PhaseLabel(p string) string {
+	switch strings.ToLower(p) {
+	case "request", "response", "stream", "model":
+		return d.tr.T("phase." + strings.ToLower(p))
+	default:
+		return p
+	}
+}
+
+func (d uiViewData) ActionLabel(a string) string {
+	switch strings.ToLower(a) {
+	case "block", "warn", "mask", "restore", "passthrough", "error", "degraded":
+		return d.tr.T("action." + strings.ToLower(a))
+	default:
+		return a
+	}
+}
+
+func (d uiViewData) ActionHref(action string) string {
+	return buildDashboardLink(d.rawBaseURL, action, d.RefreshSeconds, d.explicitLang)
 }
 
 var dashboardTmpl = template.Must(template.New("dashboard").Funcs(template.FuncMap{
@@ -77,46 +125,9 @@ var dashboardTmpl = template.Must(template.New("dashboard").Funcs(template.FuncM
 	},
 	"fmtBytes":   formatBytes,
 	"fmtBytes64": formatBytes64,
-	"containsQ": func(s string) bool {
-		return strings.Contains(s, "?")
-	},
-	"phaseLabel": func(p string) string {
-		switch strings.ToLower(p) {
-		case "request":
-			return "请求"
-		case "response":
-			return "响应"
-		case "stream":
-			return "流式"
-		case "model":
-			return "模型"
-		default:
-			return p
-		}
-	},
-	"actionLabel": func(a string) string {
-		switch strings.ToLower(a) {
-		case "block":
-			return "拦截"
-		case "warn":
-			return "告警"
-		case "mask":
-			return "脱敏"
-		case "restore":
-			return "还原"
-		case "passthrough":
-			return "放行"
-		case "error":
-			return "错误"
-		case "degraded":
-			return "降级"
-		default:
-			return a
-		}
-	},
 	"actionClass": func(a string) string {
 		switch strings.ToLower(a) {
-		case "block":
+		case "block", "error", "degraded":
 			return "badge-red"
 		case "warn":
 			return "badge-amber"
@@ -124,22 +135,11 @@ var dashboardTmpl = template.Must(template.New("dashboard").Funcs(template.FuncM
 			return "badge-blue"
 		case "restore":
 			return "badge-green"
-		case "error", "degraded":
-			return "badge-red"
 		default:
 			return "badge-muted"
 		}
 	},
 }).Parse(strings.Replace(dashboardHTML, "/*__DASHBOARD_CSS__*/", dashboardCSS, 1)))
-
-var (
-	//go:embed assets/dashboard.css
-	dashboardCSS string
-	//go:embed assets/dashboard.html
-	dashboardHTML string
-	//go:embed assets/portal.html
-	portalHTML string
-)
 
 func renderPortalHTML() pluginapi.ManagementResponse {
 	html := strings.Replace(portalHTML, "/*__DASHBOARD_CSS__*/", dashboardCSS, 1)
@@ -153,8 +153,9 @@ func renderPortalHTML() pluginapi.ManagementResponse {
 	}
 }
 
-func renderDashboardHTML(st engine.Status, baseURL, actionFilter string, eventLimit, refreshSec int) pluginapi.ManagementResponse {
-	healthLabel, healthClass := deriveHealth(st)
+func renderDashboardHTML(st engine.Status, baseURL, actionFilter string, eventLimit, refreshSec int, locale, explicitLang string) pluginapi.ManagementResponse {
+	tr := newTranslator(locale)
+	healthLabel, healthClass := deriveHealth(st, tr)
 	dlPct := 0.0
 	if st.Model.DownloadTotal > 0 {
 		dlPct = float64(st.Model.DownloadDone) * 100 / float64(st.Model.DownloadTotal)
@@ -162,7 +163,7 @@ func renderDashboardHTML(st engine.Status, baseURL, actionFilter string, eventLi
 
 	data := uiViewData{
 		Status:          st,
-		BaseURL:         baseURL,
+		BaseURL:         buildDashboardLink(baseURL, actionFilter, refreshSec, explicitLang),
 		JSONURL:         managementBasePath + managementStatusPath + "?format=json",
 		PreviewURL:      managementBasePath + managementPreviewPath,
 		DebugCaptureURL: managementBasePath + managementDebugCapturePath,
@@ -178,13 +179,20 @@ func renderDashboardHTML(st engine.Status, baseURL, actionFilter string, eventLi
 		BytesInText:     formatBytes(int(st.Stats.BytesMaskedIn)),
 		BytesOutText:    formatBytes(int(st.Stats.BytesRestoredOut)),
 		KindBars:        buildBars(st.Stats.HitsByKind, nil),
-		FinderBars:      buildBars(st.Stats.HitsByFinder, finderDescriptions),
+		FinderBars:      buildBars(st.Stats.HitsByFinder, finderDescriptions(tr)),
 		ProtocolRows:    buildDimRows(st.Stats.ByProtocol),
 		ModelRows:       buildDimRows(st.Stats.ByModel),
 		HasEvents:       len(st.RecentEvents) > 0,
 		RefreshSeconds:  refreshSec,
-		RefreshLink:     appendQuery(baseURL, actionFilter, 5),
-		StopRefreshLink: appendQuery(baseURL, actionFilter, 0),
+		RefreshLink:     buildDashboardLink(baseURL, actionFilter, 5, explicitLang),
+		StopRefreshLink: buildDashboardLink(baseURL, actionFilter, 0, explicitLang),
+		Locale:          tr.Locale(),
+		Locales:         supportedLocales,
+		LangCookieName:  langCookieName,
+		MessagesJSON:    tr.MessagesJSON(),
+		rawBaseURL:      baseURL,
+		explicitLang:    explicitLang,
+		tr:              tr,
 	}
 
 	var buf bytes.Buffer
@@ -193,12 +201,16 @@ func renderDashboardHTML(st engine.Status, baseURL, actionFilter string, eventLi
 	}
 	return pluginapi.ManagementResponse{
 		StatusCode: http.StatusOK,
-		Headers:    http.Header{"Content-Type": {"text/html; charset=utf-8"}},
-		Body:       buf.Bytes(),
+		Headers: http.Header{
+			"Content-Type":  {"text/html; charset=utf-8"},
+			"Cache-Control": {"no-store"},
+			"Vary":          {"Accept-Language, Cookie"},
+		},
+		Body: buf.Bytes(),
 	}
 }
 
-func appendQuery(baseURL, actionFilter string, refreshSec int) string {
+func buildDashboardLink(baseURL, actionFilter string, refreshSec int, lang string) string {
 	sep := "?"
 	if strings.Contains(baseURL, "?") {
 		sep = "&"
@@ -210,42 +222,47 @@ func appendQuery(baseURL, actionFilter string, refreshSec int) string {
 	if refreshSec > 0 {
 		params = append(params, fmt.Sprintf("refresh=%d", refreshSec))
 	}
+	if lang != "" {
+		params = append(params, "lang="+lang)
+	}
 	if len(params) == 0 {
 		return baseURL
 	}
 	return baseURL + sep + strings.Join(params, "&")
 }
 
-func deriveHealth(st engine.Status) (string, string) {
+func deriveHealth(st engine.Status, tr translator) (string, string) {
 	if st.Model.Enabled {
 		if st.Model.LastError != "" || st.Model.DownloadError != "" {
-			return "模型异常（规则兜底）", "badge-red"
+			return tr.T("health.model_error"), "badge-red"
 		}
 		if st.Model.Downloading {
-			return "模型下载中", "badge-amber"
+			return tr.T("health.model_downloading"), "badge-amber"
 		}
 		if st.Model.Behind {
-			return "模型繁忙（超时降级）", "badge-amber"
+			return tr.T("health.model_busy"), "badge-amber"
 		}
 		if !st.Model.Installed {
 			if st.Model.Strict {
-				return "缺失权重（strict 将拒载）", "badge-amber"
+				return tr.T("health.weights_missing_strict"), "badge-amber"
 			}
-			return "缺失权重（仅规则运行）", "badge-amber"
+			return tr.T("health.weights_missing_fallback"), "badge-amber"
 		}
 	}
 	if st.Stats.RequestsTotal > 0 {
-		return "运行中", "badge-green"
+		return tr.T("health.running"), "badge-green"
 	}
-	return "空闲", "badge-blue"
+	return tr.T("health.idle"), "badge-blue"
 }
 
-var finderDescriptions = map[string]string{
-	"rule":  "内置规则",
-	"yours": "自定义规则",
-	"word":  "词表",
-	"model": "本地模型",
-	"known": "关联匹配",
+func finderDescriptions(tr translator) map[string]string {
+	return map[string]string{
+		"rule":  tr.T("finder.rule"),
+		"yours": tr.T("finder.yours"),
+		"word":  tr.T("finder.word"),
+		"model": tr.T("finder.model"),
+		"known": tr.T("finder.known"),
+	}
 }
 
 func buildBars(counts map[string]int64, meta map[string]string) []uiBarItem {

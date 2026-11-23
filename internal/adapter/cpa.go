@@ -368,7 +368,8 @@ func (p *Plugin) handleManagement(req pluginapi.ManagementRequest) pluginapi.Man
 			if path == managementStatusPath {
 				baseURL = managementBasePath + managementStatusPath + "?format=html"
 			}
-			return renderDashboardHTML(st, baseURL, actionFilter, eventLimit, refreshSec)
+			explicitLang, _ := normalizeLocale(req.Query.Get("lang"))
+			return renderDashboardHTML(st, baseURL, actionFilter, eventLimit, refreshSec, resolveLocale(req), explicitLang)
 		}
 		return jsonManagementResponse(http.StatusOK, st)
 	case method == http.MethodPost && path == managementPreviewPath:
