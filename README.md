@@ -2,27 +2,31 @@
 
 # CPA Reductant
 
-A reversible privacy redaction plugin for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA). Drop it into CPA's plugins directory to mask secrets, personal data, and custom sensitive terms before prompts leave for upstream LLMs, and automatically restore them in both JSON and streaming SSE responses.
-
-## How It Works
+Reversible redaction plugin for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA). It masks secrets, personal data, and custom terms in outbound LLM requests, then restores them in JSON and streaming SSE responses.
 
 ```text
 Client ──▶ CLIProxyAPI + cpa-reductant (Mask / Warn / Block) ──▶ Upstream LLM
 Client ◀── CLIProxyAPI + cpa-reductant (Restore, JSON & SSE) ◀── Upstream LLM
 ```
 
-- **Reversible redaction**: replaces matched text with deterministic HMAC placeholders (or optional shape-preserving fakes) outbound, and restores the original values seamlessly on the way back.
-- **Layered detection**: combines built-in secret and structured PII rules (with `home`, `userhost`, `ip`, and `bucket` disabled by default to avoid coding-path false positives), custom wordlists/prefix/regex rules, and an optional embedded local PII model (`astrlink-guard`).
-- **Zero-plaintext observability**: ships an authenticated management dashboard with live metrics, rule preview, and temporary in-memory debug capture without ever logging raw secrets.
-- **Broad protocol coverage**: works across `claude`, `openai`, `openai-response` (including WebSocket client input), `gemini`, `interactions`, `openai-image` / `openai-speech` / `openai-video`, `codex`, and `antigravity`.
+## Features
 
-## Installation & Quick Start
+- Replaces matched values with deterministic HMAC placeholders (or optional shape-preserving fakes) on requests, and restores them on responses.
+- Combines built-in secret and structured PII rules (`home`, `userhost`, `ip`, and `bucket` are off by default to avoid matching local paths and addresses), custom wordlists/prefix/regex rules, and an optional PII model (`astrlink-guard` locally or an HTTP/Presidio NER service).
+- Supports per-model/per-protocol policy overrides, optional per-`CallerScope` restoration isolation, async webhook alerts, Prometheus `/metrics`, and a management UI with preview and temporary in-memory debug capture.
+- Works across `claude`, `openai`, `openai-response` (including WebSocket client input), `gemini`, `interactions`, `openai-image`, `openai-speech`, `openai-video`, `codex`, and `antigravity`.
 
-1. **Get the plugin**:
-   - **Prebuilt binaries**: download `cpa-reductant_<version>_<os>_<arch>.zip` (`linux`/`darwin`/`windows` × `amd64`/`arm64`, verifiable via [checksums.txt](https://github.com/Moraxyc/cpa-reductant/releases/latest/download/checksums.txt)) from [Latest Release](https://github.com/Moraxyc/cpa-reductant/releases/latest) and extract the shared library (`.so` / `.dylib` / `.dll`) into CPA's `plugins.dir`.
-   - **Nix / NixOS**: use `packages.<system>.cpa-reductant` or `overlays.default` (`pkgs.cpa-reductant`); output is located at `$out/lib/cliproxyapi/plugins/<os>/<arch>/cpa-reductant.<ext>`.
+## Installation
 
-2. **Enable in `config.yaml`** and start or reload CPA:
+### Prebuilt binaries
+
+Download `cpa-reductant_<version>_<os>_<arch>.zip` (`linux`/`darwin`/`windows` × `amd64`/`arm64`) from [Releases](https://github.com/Moraxyc/cpa-reductant/releases/latest) (SHA-256 in [checksums.txt](https://github.com/Moraxyc/cpa-reductant/releases/latest/download/checksums.txt)) and place the shared library (`.so` / `.dylib` / `.dll`) into CPA's `plugins.dir`.
+
+### Nix
+
+Use `packages.<system>.cpa-reductant` or `overlays.default` (`pkgs.cpa-reductant`). The shared library is installed at `$out/lib/cliproxyapi/plugins/<os>/<arch>/cpa-reductant.<ext>`.
+
+### Enable in `config.yaml`
 
 ```yaml
 plugins:
@@ -33,23 +37,21 @@ plugins:
       enabled: true
 ```
 
-By default, all configured upstream models and supported protocols are protected with built-in secret and personal-data rules enabled.
+Start or reload CPA. By default, all configured models and supported protocols run with built-in secret and personal-data rules enabled.
 
 ## Documentation
 
-| Topic | Guide | Covers |
-| --- | --- | --- |
-| Configuration | [Configuration Reference](docs/en/configuration.md) | Scope (`models` vs `model`), built-in `kinds`, `words`/`rules`/`allow`, `actions`, `shape`, `key_path`, supported endpoints & limitations |
-| Semantic PII | [Local PII Model (AstrLink Guard)](docs/en/local-model.md) | Online auto-download, `model.dir` resolution, air-gapped setup, `min_score`/`strict`/`wait_ms`, caching |
-| Operations | [Management Dashboard & API](docs/en/management.md) | Web UI portal, masking preview, debug capture, model downloads, HTTP endpoints |
-| Contributing | [Developer Guide](docs/en/DEVELOPMENT.md) | Architecture, Magpie patches, Nix & native builds, testing, CI/release, upstream sync |
+- [Configuration Reference](docs/en/configuration.md) — routing globs, `policies`, built-in rules, `scope_isolation`, `alerts`, and limitations
+- [PII Model Guide](docs/en/local-model.md) — local `astrlink-guard` setup, offline weights, and remote HTTP/Presidio NER
+- [Management UI & API](docs/en/management.md) — dashboard, preview, debug capture, Prometheus `/metrics`, and HTTP endpoints
+- [Developer Guide](docs/en/DEVELOPMENT.md) — architecture, Magpie patches, builds, tests, and upstream sync
 
-## Credit
+## Credits
 
-- [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI): native plugin ABI host and multi-protocol proxy foundation
-- [Magpie](https://github.com/yetone/magpie): reversible redaction engine (`redact`) and local model inference wrapper (`guard`)
-- [AstrLink Guard](https://huggingface.co/QuantumNous/astrlink-guard): lightweight local PII semantic recognition model
+- [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — plugin ABI host and multi-protocol proxy
+- [Magpie](https://github.com/yetone/magpie) — reversible redaction (`redact`) and model wrapper (`guard`)
+- [AstrLink Guard](https://huggingface.co/QuantumNous/astrlink-guard) — local int8 PII NER model
 
 ## License
 
-Open-sourced under the [MIT License](LICENSE).
+[MIT](LICENSE)

@@ -1,34 +1,31 @@
 **English** | [简体中文](../zh/management.md)
 
-# Management Dashboard & Operations API
+# Management UI & Operations API
 
-`cpa-reductant` provides a built-in web dashboard and authenticated HTTP endpoints for monitoring redaction activity, testing rules, debugging request diffs, and managing local model weights. Return to the [README](../../README.md) for overview and installation.
+## Web Dashboard
 
-## Opening the Web Dashboard
+Open CPA's console (`management.html`) and select `cpa-reductant` under **Plugins**, or open `/v0/resource/plugins/cpa-reductant/ui` directly. Authenticate with `management.secret-key` from `config.yaml` (kept in browser `sessionStorage` for the current tab).
 
-1. Open the CPA management console (`management.html`) and click `cpa-reductant` under the **Plugins** menu on the left (or visit `/v0/resource/plugins/cpa-reductant/ui` directly).
-2. Sign in with `management.secret-key` from `config.yaml` (stored in the current browser tab only).
+What the UI exposes:
 
-## Dashboard Capabilities
+- **Status & events**: active policy switches, mask/warn/block/restore counters, average and P95 latency, per-protocol and per-model breakdowns, and recent audit events (placeholders and kinds only, never plaintext).
+- **Preview**: test plain text or JSON request payloads (`mode: "json"`) against the active config, a target `model`/`protocol` policy, or temporary `override` fields (`words`, `allow`, `shape`, etc.). Previews do not mutate counters or placeholder mappings.
+- **Debug capture**: temporarily capture request/response pairs in memory (default TTL 5 min, max 30 min) to inspect raw request, masked request, upstream response, and restored response with inline token highlighting, JSON export, and copyable `allow` YAML snippets.
+- **Local model**: view `astrlink-guard` weight status, resolved path, and download progress, or trigger/retry a download.
 
-- **Live overview**: view active policy switches, mask/warn/block/restore counts, average processing latency, per-protocol and per-model traffic breakdown, and recent audit events (recording redacted tokens and types only, never plaintext).
-- **Masking preview**: test plain text or full API JSON request bodies (`mode: "json"`) against the active policy, a specific `model`/`protocol` override, or temporary what-if `override` fields (`words`, `allow`, `shape`, etc.) without affecting counters or persisting mappings.
-- **Debug capture**: temporarily enable in-memory request/response diffing (defaults to 5 minutes TTL, up to 30 minutes max) to compare **Raw request / Masked request → upstream / Upstream response / Restored response → client** with inline token highlighting, one-click JSON export, and copyable `allow` YAML snippets, then stop and clear the buffer anytime.
-- **Local model management**: monitor `astrlink-guard` weight status, resolved directory, and download progress, or trigger/retry weight downloads directly from the UI.
+Block, fallback, and model download events are also written to CPA host logs.
 
-> All block, fallback/degraded, and model download events are also logged to the CPA host logs.
+## HTTP API
 
-## HTTP Operations API
+All endpoints require `management.secret-key` via `Authorization: Bearer <secret-key>` or `X-Management-Key: <secret-key>`.
 
-All endpoints below require `management.secret-key` authentication (for example via `Authorization: Bearer <secret-key>` or `X-Management-Key: <secret-key>`).
-
-| Endpoint | Purpose | Common Query Params / Request Body |
+| Endpoint | Purpose | Query Params / JSON Body |
 | --- | --- | --- |
-| `GET /v0/management/cpa-reductant/ui` | Server-rendered HTML dashboard | `?refresh=5` (auto-refresh interval in seconds), `?events=N`, `?action=...` |
-| `GET /v0/management/cpa-reductant/status` | Full JSON status and metrics snapshot | `?format=html`, `?events=N`, `?action=mask\|warn\|block\|restore\|passthrough\|error` |
-| `GET /v0/management/cpa-reductant/metrics` | Prometheus text exposition metrics (`0.0.4`) | None |
-| `POST /v0/management/cpa-reductant/preview` | Read-only masking preview (text or JSON, with optional what-if overrides) | `{"text": "...", "mode": "text\|json", "protocol": "...", "model": "...", "override": {...}}` |
-| `GET /v0/management/cpa-reductant/debug/capture` | Read in-memory debug captures | `?id=`, `?limit=`, `?protocol=`, `?model=` |
+| `GET /v0/management/cpa-reductant/ui` | Server-rendered HTML dashboard | `?refresh=5`, `?events=N`, `?action=...` |
+| `GET /v0/management/cpa-reductant/status` | JSON status and metrics snapshot | `?format=html`, `?events=N`, `?action=mask\|warn\|block\|restore\|passthrough\|error` |
+| `GET /v0/management/cpa-reductant/metrics` | Prometheus metrics (`0.0.4` text format) | — |
+| `POST /v0/management/cpa-reductant/preview` | Side-effect-free masking preview | `{"text": "...", "mode": "text\|json", "protocol": "...", "model": "...", "override": {...}}` |
+| `GET /v0/management/cpa-reductant/debug/capture` | List or fetch in-memory captures | `?id=`, `?limit=`, `?protocol=`, `?model=` |
 | `POST /v0/management/cpa-reductant/debug/capture` | Enable/disable capture or update TTL | `{"enabled": true, "ttl_seconds": 300}` |
-| `DELETE /v0/management/cpa-reductant/debug/capture` | Clear all cached captures immediately | None |
-| `POST /v0/management/cpa-reductant/model/download` | Trigger or retry local model download | `{"mirror": "..."}` (optional) |
+| `DELETE /v0/management/cpa-reductant/debug/capture` | Clear captured entries | — |
+| `POST /v0/management/cpa-reductant/model/download` | Start or retry local model download | `{"mirror": "..."}` (optional) |

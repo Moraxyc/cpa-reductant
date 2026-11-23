@@ -1,10 +1,10 @@
 [English](../en/configuration.md) | **简体中文**
 
-# 配置说明
+# 配置参考
 
-本文档详细介绍 CLIProxyAPI `config.yaml` 中 `plugins.configs.cpa-reductant` 支持的全部配置项与协议范围。如需快速安装与启用，请查看 [README](README.md)。
+配置写在 CPA `config.yaml` 的 `plugins.configs.cpa-reductant` 下。
 
-## 完整配置示例
+## 配置示例
 
 ```yaml
 plugins:
@@ -14,52 +14,45 @@ plugins:
     cpa-reductant:
       enabled: true
 
-      # 1. 作用范围控制
-      models: []                    # 目标上游 LLM 模型 ID 或通配符（支持 *、?）；省略或 [] 表示保护所有已配置模型（注意与下方 model 区分）
-      exclude_models: []            # 需要跳过的模型 ID 或通配符（优先级高于 models，例如 ["ollama/*"]）
-      protocols: []                 # 限定生效的 CPA 协议格式；省略或 [] 表示全部支持格式
+      models: []                    # 上游模型 ID 或通配符（*、?）；留空匹配全部
+      exclude_models: []            # 跳过的模型 ID 或通配符（优先级高于 models）
+      protocols: []                 # 生效协议；留空匹配全部受支持协议
 
-      # 2. 内建规则开关
-      secrets: true                 # 默认 true：脱敏密钥、API Token、私钥、密码等
-      personal: true                # 默认 true：脱敏内建个人隐私（邮箱、电话、证件、银行卡等）
-      kinds:                        # 可选：按具体个人隐私类别覆盖默认开关
+      secrets: true                 # 内建密钥检测
+      personal: true                # 内建个人隐私检测
+      kinds:                        # 按类别覆写个人隐私开关
         ssn: true                   # 默认开启：ssn, passport, iban, birthday, mac, serial
         home: false                 # 默认关闭：home, userhost, ip, bucket
-        ip: false
 
-      # 3. 自定义词表与正则规则
-      words: [example-private-term] # 需要保护的自定义敏感词（字面量）
-      words_any_case: false         # true 时忽略大小写匹配 words
-      words_whole: false            # true 时仅在完整词边界匹配 words
-      allow: [ops@example.org]      # 允许明文放行的精确值（若同时在 words 中，仍优先受 words 保护）
-      # rules:                      # 自定义前缀或正则规则（最多 32 条；prefix 与 regex 二选一）
+      words: [example-private-term] # 字面量自定义敏感词
+      words_any_case: false
+      words_whole: false
+      allow: [ops@example.org]      # 明文放行的精确值
+      # rules:                      # 最多 32 条自定义规则；prefix 与 regex 二选一
       #   - kind: CORP_KEY
       #     prefix: crp_
       #   - kind: TICKET
       #     regex: 'JIRA-\d{4,}'
 
-      # 4. 命中动作与占位符行为
-      # actions:                    # 按占位符类型覆盖命中动作：mask（脱敏）| warn（仅告警）| block（拒绝请求并返回 400）
+      # actions:                    # 按类别指定动作：mask | warn | block（HTTP 400）
       #   EMAIL: warn
       #   PRIVATE_KEY: block
-      block_terms: false            # true 时拒绝命中 words 自定义词的请求（等价 actions.TERM=block）
-      shape: false                  # true 时使用保形伪造值替代 {{...}} 占位符
-      # key_path: /var/lib/cpa/reductant.key # 可选（或环境变量 CPA_REDUCTANT_KEY_PATH）：持久化占位符 HMAC 密钥
-      scope_isolation: false        # 按 CPA CallerScope 隔离占位符还原，防止多租户跨租户还原越权
-      # scope_ttl_seconds: 86400    # 开启 scope_isolation 时单租户占位符追踪保留时间（秒，默认 86400）
+      block_terms: false            # 等价于 actions.TERM: block
+      shape: false                  # 使用保形伪造值替代 {{KIND_...}} 占位符
+      # key_path: /var/lib/cpa/reductant.key # 或环境变量 CPA_REDUCTANT_KEY_PATH
+      scope_isolation: false        # 按 CPA CallerScope 隔离占位符还原
+      # scope_ttl_seconds: 86400
 
-      # 5. 零明文异步 Webhook 告警（可选）
       # alerts:
       #   webhook_url: https://hooks.example.internal/cpa-alerts
-      #   events: [block, warn]     # 支持 block、warn、error（默认 [block]）
+      #   events: [block, warn]     # block | warn | error（默认 [block]）
       #   timeout_ms: 5000
       #   headers:
       #     Authorization: "Bearer <token>"
 
-      # 6. PII 语义识别模型（默认关闭，支持本地 astrlink-guard 或远程 http/presidio，见 local-model.md）
-      model:
+      model:                        # PII 检测模型（见 local-model.md）
         enabled: false
-        provider: astrlink-guard    # astrlink-guard（本地）| http（远程 generic / presidio）
+        provider: astrlink-guard    # astrlink-guard | http
         auto_download: true
         name: astrlink-guard
         # dir: /path/to/astrlink-guard
@@ -68,8 +61,7 @@ plugins:
         # wait_ms: 2000
         # mirror: https://hf-mirror.com
 
-      # 7. 按模型 / 协议分级的策略覆写（按声明顺序依次匹配合并）
-      # policies:
+      # policies:                   # 按模型/协议覆写策略，按声明顺序依次叠加
       #   - name: strict-external-claude
       #     models: ["claude-*"]
       #     exclude_models: ["claude-haiku-*"]
@@ -80,64 +72,50 @@ plugins:
       #       min_score: 0.75
 ```
 
-## 配置要点说明
+## 字段说明与优先级
 
-### 作用范围：`models`（复数）vs `model`（单数）
+### 路由匹配（`models`、`exclude_models`、`protocols`）
 
-- **`models`**：决定哪些**上游大模型请求**需要经过脱敏，支持通配符（`*` 匹配含 `/` 在内的任意字符序列，`?` 匹配单个字符）。省略或设为 `[]` 表示保护所有已配置模型。
-- **`exclude_models`**：需要跳过脱敏的模型 ID 或通配符（如 `ollama/*`、`local-*`），优先级高于 `models`。
-- **`model`**：配置 **PII 语义识别模型**（本地内嵌 `astrlink-guard` 或远程 `http` NER 后端），详情见 [PII 语义模型指南](local-model.md)。
-- **`protocols`**：限定生效的 CPA 协议格式，省略或 `[]` 表示覆盖全部已支持格式。兼容别名包括：`anthropic` → `claude`、`chat-completions` / `openai-chat-completions` → `openai`、`responses` / `openai-responses` → `openai-response`。
+- `models`（复数）决定拦截哪些上游 LLM 请求；`model`（单数）配置 PII 识别模型。
+- `models` 与 `exclude_models` 都支持 `*`（匹配含 `/` 在内的任意字符）和 `?`（单字符）。命中 `exclude_models` 时始终跳过脱敏。
+- `protocols` 支持常见别名：`anthropic` → `claude`、`chat-completions` / `openai-chat-completions` → `openai`、`responses` / `openai-responses` → `openai-response`。
 
-### 按模型 / 协议分级策略（`policies`）
+### 分级策略（`policies`）
 
-- **`policies`**：可针对满足 `models`、`exclude_models`、`protocols` 条件的子集流量覆写策略，多条命中按声明顺序叠加：
-  - 标量开关（`secrets`、`personal`、`words_any_case`、`words_whole`、`shape`、`block_terms`）与 `model`（`enabled`、`min_score`、`strict`、`wait_ms`）非空时覆写基础配置。
-  - `kinds` 与 `actions` 按键合并（显式将某类动作设为 `mask` 可覆盖基础配置中的 `warn` / `block`）。
-  - `words`、`rules`、`allow` 追加到基础列表之后。
+所有匹配当前请求（`models`、`exclude_models`、`protocols`）的条目会按声明顺序依次合并：
 
-### 多租户隔离与 Webhook 告警（`scope_isolation`、`alerts`）
+- 布尔开关（`secrets`、`personal`、`words_any_case`、`words_whole`、`shape`、`block_terms`）和 `model` 字段（`enabled`、`min_score`、`strict`、`wait_ms`）显式设置时覆写基础值。
+- `kinds` 与 `actions` 按键合并。显式设为 `mask` 可以取消基础配置里的 `warn` 或 `block`。
+- `words`、`rules`、`allow` 追加到基础列表之后。
 
-- **`scope_isolation`**（默认 `false`）：按 CPA 传入的 `CallerScope` 在有界 LRU/TTL 表（`scope_ttl_seconds` 默认 `86400` 秒）中追踪各租户脱敏产生的占位符，阻止响应或 SSE 流还原其他租户的占位符。
-- **`alerts`**：触发 `events`（`block` / `warn` / `error`）时，通过有界非阻塞队列向 `alerts.webhook_url` 异步推送零明文 `FilterEvent` JSON，不会阻塞请求主链路。
+### 规则、词表与动作
 
-### 内建规则类别（`secrets`、`personal`、`kinds`）
+- `home`、`userhost`、`ip`、`bucket` 默认关闭，避免编程场景下误伤本地路径和常见网络地址。
+- 同一个词同时出现在 `words` 和 `allow` 时，`words` 优先。
+- `rules` 最多 32 条；每条需指定 `kind`，并在 `prefix` 与 `regex` 中选一个。
+- `actions` 可选值：`mask`（替换为占位符并在响应时还原）、`warn`（保留原文，记审计事件和宿主日志）、`block`（直接返回 HTTP `400`，不发往上游）。
+- 同时配置 `block_terms: true` 和 `actions.TERM` 时，以 `actions.TERM` 为准。
 
-- **`secrets`**（默认 `true`）：脱敏 API Key、Bearer Token、私钥、密码等凭据信息。
-- **`personal`**（默认 `true`）：脱敏强格式个人隐私，可通过 `kinds` 按具体类别覆写开关：
-  - **默认开启**：`ssn`、`passport`、`iban`、`birthday`、`mac`、`serial`。
-  - **默认关闭**：`home`、`userhost`、`ip`、`bucket`（避免误伤编程场景中的本地路径与常见网络地址）。
+### 密钥、租户隔离与告警
 
-### 自定义词表与正则规则（`words`、`allow`、`rules`）
+- `key_path`（或 `CPA_REDUCTANT_KEY_PATH`）用于持久化 32 字节 HMAC 密钥，确保 CPA 重启后历史对话中的占位符仍可还原；未配置则每次启动重新生成内存密钥。首次脱敏发生后，热重载不会切换 `key_path`，修改需重启 CPA。
+- 开启 `scope_isolation` 后，插件会在有界 LRU/TTL 表（`scope_ttl_seconds` 默认 `86400`）中按 CPA `CallerScope` 记录每个租户生成的占位符，响应与 SSE 流只还原同一作用域下的占位符。
+- `alerts` 通过有界异步队列向 `alerts.webhook_url` 发送不含明文的 `FilterEvent` JSON；Webhook 变慢或失败时会丢弃溢出事件，不阻塞请求处理。
 
-- **`words`**：按字面量匹配的自定义敏感词；配合 `words_any_case: true` 可忽略大小写，配合 `words_whole: true` 仅在完整词边界匹配。
-- **`allow`**：允许明文放行的精确值；若同一值同时出现在 `words` 中，仍优先受 `words` 保护。
-- **`rules`**：自定义前缀或正则规则（最多 32 条），每条规则需指定 `kind`，并在 `prefix` 与 `regex` 中二选一。
+## 支持的协议与端点
 
-### 命中动作与占位符行为（`actions`、`block_terms`、`shape`、`key_path`）
-
-- **`actions`**：按占位符类型覆写处理动作：
-  - `mask`（默认）：替换为占位符，并在响应返回时还原原文。
-  - `warn`：保留原文放行，同时写入审计事件与 CPA 宿主日志告警。
-  - `block`：直接拦截并返回 HTTP `400`，不向游发起请求。
-- **`block_terms`**：设为 `true` 时拒绝命中 `words` 自定义词的请求（等价于 `actions.TERM: block`）。若同时配置了显式的 `actions.TERM`，以显式的 `actions.TERM` 为准。
-- **`shape`**：设为 `true` 时生成保形伪造值，替代默认的 `{{KIND_...}}` 占位符。
-- **`key_path`**（或环境变量 `CPA_REDUCTANT_KEY_PATH`）：持久化 32 字节 HMAC 密钥，使跨重启的历史对话仍可还原此前生成的占位符。未配置时每次重启 CPA 会生成临时内存密钥。注意：首次脱敏发生后，热重载不能动态更换 `key_path`，修改需重启 CPA 生效。
-
-## 支持范围与当前限制
-
-### 已支持的协议与端点（含 JSON 与流式 SSE）
+除特别注明外，均同时支持 JSON 与流式 SSE：
 
 - `claude`：`/v1/messages`、`/v1/messages/count_tokens`
 - `openai`：`/v1/chat/completions`、`/v1/completions`
-- `openai-response`：`/v1/responses`、`/v1/responses/compact`、`/backend-api/codex/responses`（支持 WebSocket `/v1/responses` 客户端接入，上游转发回退为 HTTP）
+- `openai-response`：`/v1/responses`、`/v1/responses/compact`、`/backend-api/codex/responses`（客户端支持 WebSocket `/v1/responses`，向上游转发走 HTTP）
 - `gemini`：`/v1beta/models/*:generateContent`、`:streamGenerateContent`、`:countTokens`
-- `interactions`：`/v1beta/interactions`（同时支持 `model` 与 `agent` 请求）
-- `openai-image` / `openai-speech` / `openai-video`：文生图/改图、TTS（保留二进制音频响应）、视频生成
-- `codex` / `antigravity`：SDK 内部格式
+- `interactions`：`/v1beta/interactions`（`model` 与 `agent` 请求）
+- `openai-image`、`openai-speech`（二进制音频响应原样透传）、`openai-video`
+- `codex`、`antigravity`
 
-### 当前限制
+## 当前限制
 
-- 进程内本地推理支持 `astrlink-guard`（CPU / macOS CoreML）；如需 GPU 或独立推理服务，可配置 `model.provider: http` 接入外部通用或 Presidio 兼容 NER 服务。
-- 暂不支持 CPA Home 模式与 `/v1/alpha/search`（CPA 原生限制）。
-- 未开启 `scope_isolation` 时，占位符还原映射在进程内共享；插件未加载或路由失败时，CPA 会回退原生路由直出。
+- 进程内推理仅支持 `astrlink-guard`（CPU / macOS CoreML）。如需 GPU 或独立推理服务，请将 `model.provider` 设为 `http` 对接外部通用或 Presidio 兼容 NER 服务。
+- 不支持 CPA Home 模式与 `/v1/alpha/search`（CPA 宿主限制）。
+- `scope_isolation` 为 `false` 时，还原映射在进程内共享；插件卸载或路由失败时，CPA 回退到原生上游转发。

@@ -1,34 +1,31 @@
 [English](../en/management.md) | **简体中文**
 
-# 管理面板与运维接口
+# 管理面板与接口
 
-`cpa-reductant` 内置可视化管理看板与鉴权 HTTP 接口，用于查看脱敏统计、在线试跑规则、排查请求对照以及管理本地模型权重。返回 [README](README.md) 查看项目概览与安装说明。
+## Web 面板
 
-## 打开可视化面板
+在 CPA 管理后台（`management.html`）左侧「插件」菜单点击 `cpa-reductant`，或直接访问 `/v0/resource/plugins/cpa-reductant/ui`。使用 `config.yaml` 中的 `management.secret-key` 登录（凭证仅保存在当前标签页的 `sessionStorage`）。
 
-1. 打开 CPA 管理后台页面（`management.html`），在左侧「插件」菜单中点击 `cpa-reductant`（或直接访问 `/v0/resource/plugins/cpa-reductant/ui`）。
-2. 输入 `config.yaml` 中配置的 `management.secret-key` 登录（凭证仅保存于当前浏览器标签页）。
+面板功能：
 
-## 面板常用功能
+- **状态与事件**：查看生效策略、脱敏/告警/拦截/还原计数、平均与 P95 耗时、按协议/模型分布及近期审计事件（仅含占位符与类别，不含原文）。
+- **预览测试**：对纯文本或 JSON 请求体（`mode: "json"`）测试脱敏结果，可指定目标 `model`/`protocol` 或附加临时 `override`（如 `words`、`allow`、`shape`）。预览不修改统计计数，也不写入还原映射。
+- **调试抓包**：临时在内存中记录请求/响应对照（默认 5 分钟过期，最长 30 分钟），对比原始请求、脱敏请求、上游响应与还原响应，支持行内高亮、导出抓包 JSON 及复制 `allow` YAML 片段，随时可停止并清空。
+- **本地模型**：查看 `astrlink-guard` 权重状态、解析目录与下载进度，或在下载失败后重新触发。
 
-- **查看运行概览**：实时展示当前生效策略、脱敏/告警/拦截/还原次数、平均耗时、各协议与模型流量分布，以及近期审计事件记录（仅展示脱敏后信息与类型，不记录明文）。
-- **脱敏预览（在线测试）**：支持纯文本或完整 API JSON 请求体（`mode: "json"`），可指定目标 `model`/`protocol` 匹配分路由策略，或传入临时 `override`（如追加 `words`、`allow`、开启 `shape`）做 What-If 试跑，不影响统计数据也不保存映射记录。
-- **调试抓包（临时对照）**：遇到规则误伤或还原异常时，可在面板中临时开启内存抓包（默认 5 分钟自动过期、最长 30 分钟），直接对照查看「原始请求 / 脱敏请求 → 上游 / 上游响应 / 还原响应 → 客户端」，支持行内命中高亮、一键导出抓包 JSON 及一键复制 `allow` YAML 规则片段，排查完毕可随时关闭并清空缓存。
-- **管理本地模型**：查看 `astrlink-guard` 权重状态、解析路径与下载进度；如后台拉取失败，可在面板中一键触发或重试下载。
+拦截、降级与模型下载事件同时写入 CPA 宿主日志。
 
-> 所有拦截、降级与模型下载事件也会同步写入 CPA 宿主日志。
+## HTTP 接口
 
-## 自动化运维 / HTTP 接口
-
-以下接口均需携带 `management.secret-key` 鉴权（例如通过 `Authorization: Bearer <secret-key>` 或 `X-Management-Key: <secret-key>`）。
+以下接口均需携带 `management.secret-key`（`Authorization: Bearer <secret-key>` 或 `X-Management-Key: <secret-key>`）。
 
 | 接口 | 用途 | 常用参数 / 请求体 |
 | --- | --- | --- |
-| `GET /v0/management/cpa-reductant/ui` | 服务端渲染 HTML 监控看板 | `?refresh=5`（自动刷新秒数）、`?events=N`、`?action=...` |
-| `GET /v0/management/cpa-reductant/status` | 获取 JSON 全量状态与统计快照 | `?format=html`、`?events=N`、`?action=mask\|warn\|block\|restore\|passthrough\|error` |
-| `GET /v0/management/cpa-reductant/metrics` | 导出 Prometheus 文本格式指标（`0.0.4`） | 无 |
-| `POST /v0/management/cpa-reductant/preview` | 只读测试脱敏效果（支持文本 / JSON 与临时策略覆写） | `{"text": "...", "mode": "text\|json", "protocol": "...", "model": "...", "override": {...}}` |
-| `GET /v0/management/cpa-reductant/debug/capture` | 读取当前内存调试抓包记录 | `?id=`、`?limit=`、`?protocol=`、`?model=` |
-| `POST /v0/management/cpa-reductant/debug/capture` | 开启/关闭或重置抓包 TTL | `{"enabled": true, "ttl_seconds": 300}` |
-| `DELETE /v0/management/cpa-reductant/debug/capture` | 立即清空全部抓包缓存 | 无 |
-| `POST /v0/management/cpa-reductant/model/download` | 手动触发或重试本地模型下载 | `{"mirror": "..."}`（可选） |
+| `GET /v0/management/cpa-reductant/ui` | 服务端渲染 HTML 看板 | `?refresh=5`、`?events=N`、`?action=...` |
+| `GET /v0/management/cpa-reductant/status` | JSON 状态与统计快照 | `?format=html`、`?events=N`、`?action=mask\|warn\|block\|restore\|passthrough\|error` |
+| `GET /v0/management/cpa-reductant/metrics` | Prometheus 指标（`0.0.4` 文本格式） | — |
+| `POST /v0/management/cpa-reductant/preview` | 只读预览脱敏效果 | `{"text": "...", "mode": "text\|json", "protocol": "...", "model": "...", "override": {...}}` |
+| `GET /v0/management/cpa-reductant/debug/capture` | 查询内存调试抓包 | `?id=`、`?limit=`、`?protocol=`、`?model=` |
+| `POST /v0/management/cpa-reductant/debug/capture` | 开启/关闭或更新抓包 TTL | `{"enabled": true, "ttl_seconds": 300}` |
+| `DELETE /v0/management/cpa-reductant/debug/capture` | 清空全部抓包记录 | — |
+| `POST /v0/management/cpa-reductant/model/download` | 触发或重试本地模型下载 | `{"mirror": "..."}`（可选） |
