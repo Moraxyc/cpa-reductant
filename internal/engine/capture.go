@@ -555,24 +555,6 @@ func resolveCaptureReplacements(hits []redact.Hit, shape bool) []CaptureReplacem
 	return out
 }
 
-func lookupOriginalValue(placeholder string, shape bool) string {
-	if v, ok := redact.Value(placeholder); ok {
-		return v
-	}
-	if shape {
-		if idx := strings.IndexAny(placeholder, "=:"); idx >= 0 {
-			restStart := idx + 1
-			for restStart < len(placeholder) && (placeholder[restStart] == ' ' || placeholder[restStart] == '\t') {
-				restStart++
-			}
-			if k, ok := redact.Value(placeholder[restStart:]); ok {
-				return placeholder[:restStart] + k
-			}
-		}
-	}
-	return ""
-}
-
 func resolveCaptureRestoredItems(put map[string]int, shape bool) []CaptureRestoredItem {
 	if len(put) == 0 {
 		return nil

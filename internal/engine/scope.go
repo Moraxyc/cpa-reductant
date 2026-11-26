@@ -15,8 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/yetone/magpie/pkg/redact"
 )
 
 const (
@@ -24,6 +22,13 @@ const (
 	defaultScopeMaxEntries = 10000
 	defaultScopeTTL        = 24 * time.Hour
 )
+
+type scopeIsolator interface {
+	Record(scope string, placeholders ...string)
+	SetTTL(ttl time.Duration)
+	Snapshot(enabled bool) ScopeStats
+	WrapWriter(w http.ResponseWriter, store placeholderStore, scope string, shape bool) StreamWriter
+}
 
 // ScopeStats exposes multi-tenant scope isolation telemetry.
 type ScopeStats struct {
@@ -222,14 +227,8 @@ func (v *scopeVault) Snapshot(enabled bool) ScopeStats {
 	}
 }
 
-// StreamWriter abstracts redact.Writer so both unscoped and CallerScope-isolated
-// stream writers share a single interface in the adapter.
-type StreamWriter interface {
-	Header() http.Header
-	WriteHeader(int)
-	Write([]byte) (int, error)
-	Finish()
-	Put() map[string]int
+func (v *scopeVault) WrapWriter(w http.ResponseWriter, store placeholderStore, scope string, shape bool) StreamWriter {
+	return newScopedStreamWriter(w, v, store, scope, shape)
 }
 
 var scopePlaceholderBodyRE = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_]*_[A-Za-z2-7]{8}`)
@@ -297,10 +296,11 @@ func canonicalPlaceholder(body string) string {
 type scopedStreamWriter struct {
 	dst      http.ResponseWriter
 	vault    *scopeVault
+	store    placeholderStore
 	scope    string
 	shape    bool
 	innerBuf *restoreBuffer
-	inner    *redact.Writer
+	inner    StreamWriter
 	bypass   bool
 
 	sentinelPrefix string
@@ -309,10 +309,13 @@ type scopedStreamWriter struct {
 	allowedPut     map[string]int
 }
 
-func newScopedStreamWriter(w http.ResponseWriter, vault *scopeVault, scope string, shape bool) StreamWriter {
+func newScopedStreamWriter(w http.ResponseWriter, vault *scopeVault, store placeholderStore, scope string, shape bool) StreamWriter {
+	if store == nil {
+		store = magpiePlaceholderStore{}
+	}
 	scope = strings.TrimSpace(scope)
 	if vault == nil || scope == "" {
-		return redact.NewWriter(w)
+		return store.NewWriter(w)
 	}
 	var rnd [6]byte
 	_, _ = rand.Read(rnd[:])
@@ -320,10 +323,11 @@ func newScopedStreamWriter(w http.ResponseWriter, vault *scopeVault, scope strin
 	return &scopedStreamWriter{
 		dst:            w,
 		vault:          vault,
+		store:          store,
 		scope:          scope,
 		shape:          shape,
 		innerBuf:       innerBuf,
-		inner:          redact.NewWriter(innerBuf),
+		inner:          store.NewWriter(innerBuf),
 		bypass:         !vault.HasAny(scope),
 		sentinelPrefix: "@CPASCOPE:" + hex.EncodeToString(rnd[:]) + ":",
 		shields:        make(map[string]string),
@@ -349,9 +353,9 @@ func (sw *scopedStreamWriter) shieldUnauthorized(p []byte) []byte {
 	last := 0
 	changed := false
 	for _, m := range matches {
-		// Only shield placeholders that actually exist in Magpie's global store
+		// Only shield placeholders that actually exist in the placeholder store
 		// AND are not authorized for this CallerScope.
-		if _, exists := redact.Value(m.canon); !exists {
+		if !sw.store.HasValue(m.canon) {
 			continue
 		}
 		if sw.vault.Allows(sw.scope, m.canon) {
@@ -394,7 +398,7 @@ func (sw *scopedStreamWriter) unshieldAndVerify(emitted []byte) []byte {
 		}
 		// Defense in depth: re-seal unauthorized placeholder restored across chunk boundary.
 		sw.vault.recordBlocked(int64(delta))
-		if orig := lookupOriginalValue(p, sw.shape); orig != "" {
+		if orig := sw.store.LookupOriginal(p, sw.shape); orig != "" {
 			emitted = resealValue(emitted, orig, p)
 		}
 	}
@@ -457,7 +461,7 @@ func (sw *scopedStreamWriter) Write(p []byte) (int, error) {
 	if sw.bypass {
 		// Record blocked attempts if the response references a placeholder from another scope.
 		for _, m := range findScopePlaceholders(p) {
-			if _, exists := redact.Value(m.canon); exists {
+			if sw.store.HasValue(m.canon) {
 				sw.vault.recordBlocked(1)
 			}
 		}

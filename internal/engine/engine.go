@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -314,12 +313,13 @@ func (s *engineStats) snapshot() StatsSnapshot {
 // Engine schedules redaction and restoration primitives exposed from Magpie.
 type Engine struct {
 	cfg       atomic.Pointer[config.Config]
+	store     placeholderStore
 	weights   *modelDownloader
 	model     *modelRunner
 	stats     engineStats
 	events    *eventRing
 	capture   *debugCapture
-	scopes    *scopeVault
+	scopes    scopeIsolator
 	alerts    *alertDispatcher
 	startedAt time.Time
 
@@ -344,6 +344,7 @@ func New(cfg *config.Config) *Engine {
 	}
 	weights := newModelDownloader()
 	e := &Engine{
+		store:          magpiePlaceholderStore{},
 		weights:        weights,
 		model:          newModelRunnerWithWeights(cfg.EffectiveModelRunnerConfig(), weights),
 		events:         newEventRing(defaultEventRing),
@@ -892,14 +893,6 @@ func (e *Engine) RestoreResponse(protocol, contentType string, body []byte) []by
 	return out
 }
 
-type restoreBuffer struct {
-	bytes.Buffer
-	header http.Header
-}
-
-func (b *restoreBuffer) Header() http.Header { return b.header }
-func (*restoreBuffer) WriteHeader(int)       {}
-
 func (e *Engine) RestoreResponseWithMeta(meta RequestMeta, contentType string, body []byte) ([]byte, int) {
 	start := time.Now()
 	if len(body) == 0 || IsBinaryContentType(contentType) {
@@ -1179,13 +1172,17 @@ func (e *Engine) NewStreamWriter(w http.ResponseWriter) *redact.Writer {
 }
 
 func (e *Engine) NewStreamWriterForScope(w http.ResponseWriter, scope, protocol, model string) StreamWriter {
+	store := e.store
+	if store == nil {
+		store = magpiePlaceholderStore{}
+	}
 	if e != nil && e.scopes != nil && strings.TrimSpace(scope) != "" {
 		baseCfg := e.Config()
 		if baseCfg != nil && baseCfg.ScopeIsolation {
 			policyCfg := baseCfg.ResolvePolicy(protocol, model)
 			shape := policyCfg != nil && policyCfg.Shape
-			return newScopedStreamWriter(w, e.scopes, scope, shape)
+			return e.scopes.WrapWriter(w, store, scope, shape)
 		}
 	}
-	return redact.NewWriter(w)
+	return store.NewWriter(w)
 }
