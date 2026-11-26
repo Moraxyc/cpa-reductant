@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/moraxyc/cpa-reductant/internal/config"
 	"github.com/yetone/magpie/pkg/guard"
 )
 
@@ -27,11 +28,89 @@ const (
 	downloadStallWait  = 60 * time.Second
 )
 
+// weightProvisioner decouples on-disk weight layout resolution and async
+// downloading from modelRunner's inference scheduling.
+type weightProvisioner interface {
+	Resolve(dir string) (resolvedDir, layout string, installed bool)
+	Stamp(dir string) string
+	EnsureAsync(dir, mirror string, onReady func())
+	ForceAsync(dir, mirror string, onReady func())
+	Reset()
+	Cancel()
+	Status() (downloading bool, done, total int64, errStr string)
+	SetLogger(fn func(level, msg string, fields map[string]any))
+}
+
 func versionedModelDir(dir string) string {
 	if dir == "" {
 		return ""
 	}
 	return filepath.Join(dir, guard.Rev[:12])
+}
+
+func modelInstalled(dir string) bool {
+	_, ok := resolveModelDir(dir)
+	return ok
+}
+
+// resolveModelDir locates the directory containing the model weights: first
+// checking the pinned revision subdirectory (<dir>/<rev[:12]>, matching
+// Magpie's layout and ensuring exact pinned byte sizes), then falling back to
+// flat files directly inside <dir> for manual placement.
+func resolveModelDir(dir string) (string, bool) {
+	resolved, _, ok := resolveModelDirWithLayout(dir)
+	return resolved, ok
+}
+
+func resolveModelDirWithLayout(dir string) (string, string, bool) {
+	if dir == "" {
+		return "", "missing", false
+	}
+	vdir := versionedModelDir(dir)
+	if hasPinnedFiles(vdir) {
+		return vdir, "versioned", true
+	}
+	if hasFlatFiles(dir) {
+		return dir, "flat", true
+	}
+	return "", "missing", false
+}
+
+func hasPinnedFiles(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	for _, f := range guard.PinnedFiles {
+		fi, err := os.Stat(filepath.Join(dir, filepath.Base(f.Path)))
+		if err != nil || fi.IsDir() || fi.Size() != f.Size {
+			return false
+		}
+	}
+	return true
+}
+
+func hasFlatFiles(dir string) bool {
+	for _, rel := range guard.Files {
+		fi, err := os.Stat(filepath.Join(dir, filepath.Base(rel)))
+		if err != nil || fi.IsDir() || fi.Size() == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func modelDirStamp(dir string) string {
+	h := sha256.New()
+	for _, rel := range guard.Files {
+		name := filepath.Base(rel)
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(h, "%s:%d:%d\n", name, fi.Size(), fi.ModTime().UnixNano())
+	}
+	sum := h.Sum(nil)
+	return fmt.Sprintf("%x", sum[:6])
 }
 
 type modelDownloader struct {
@@ -51,10 +130,48 @@ type modelDownloader struct {
 	logFn     func(level, msg string, fields map[string]any)
 }
 
-func (d *modelDownloader) setLogger(fn func(level, msg string, fields map[string]any)) {
+func (d *modelDownloader) SetLogger(fn func(level, msg string, fields map[string]any)) {
 	d.mu.Lock()
 	d.logFn = fn
 	d.mu.Unlock()
+}
+
+func (d *modelDownloader) Resolve(dir string) (string, string, bool) {
+	return resolveModelDirWithLayout(dir)
+}
+
+func (d *modelDownloader) Stamp(dir string) string {
+	return modelDirStamp(dir)
+}
+
+func (d *modelDownloader) Status() (downloading bool, done, total int64, errStr string) {
+	return d.status()
+}
+
+func (d *modelDownloader) Trigger(cfg config.ModelConfig, mirrorOverride string, onReady func(dir string)) error {
+	if cfg.IsRemoteHTTP() {
+		return errors.New("model download is only supported for local astrlink-guard")
+	}
+	dir := cfg.EffectiveDir()
+	if dir == "" {
+		return errors.New("model directory could not be resolved; set model.dir or CPA_REDUCTANT_MODEL_DIR")
+	}
+	if _, _, installed := d.Resolve(dir); installed {
+		if onReady != nil {
+			onReady(dir)
+		}
+		return nil
+	}
+	mirror := strings.TrimSpace(mirrorOverride)
+	if mirror == "" {
+		mirror = cfg.Mirror
+	}
+	d.ForceAsync(dir, mirror, func() {
+		if onReady != nil {
+			onReady(dir)
+		}
+	})
+	return nil
 }
 
 func (d *modelDownloader) logf(level, msg string, fields map[string]any) {

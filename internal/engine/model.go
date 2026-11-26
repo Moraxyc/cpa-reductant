@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -126,7 +124,7 @@ type modelRunner struct {
 	cache      *textLRU
 	disk       diskCache
 	sent       sentSet
-	downloader *modelDownloader
+	weights    weightProvisioner
 
 	behindAt      atomic.Int64
 	partialLogged atomic.Int64
@@ -139,6 +137,13 @@ type modelRunner struct {
 }
 
 func newModelRunner(cfg config.ModelConfig) *modelRunner {
+	return newModelRunnerWithWeights(cfg, newModelDownloader())
+}
+
+func newModelRunnerWithWeights(cfg config.ModelConfig, weights weightProvisioner) *modelRunner {
+	if weights == nil {
+		weights = newModelDownloader()
+	}
 	cores := guard.Cores()
 	if cores < 1 {
 		cores = 1
@@ -148,10 +153,10 @@ func newModelRunner(cfg config.ModelConfig) *modelRunner {
 		loader: func(dir string) (spanFinder, error) {
 			return guard.Load(dir)
 		},
-		turn:       make(chan struct{}, cores),
-		inflight:   make(map[[32]byte]chan struct{}),
-		cache:      newTextLRU(cacheCap),
-		downloader: newModelDownloader(),
+		turn:     make(chan struct{}, cores),
+		inflight: make(map[[32]byte]chan struct{}),
+		cache:    newTextLRU(cacheCap),
+		weights:  weights,
 	}
 	r.disk.setOnError(func(err error) {
 		r.logf("warn", fmt.Sprintf("disk cache save failed: %v", err), map[string]any{
@@ -169,8 +174,8 @@ func (r *modelRunner) setLogger(fn func(level, msg string, fields map[string]any
 	r.mu.Lock()
 	r.logFn = fn
 	r.mu.Unlock()
-	if r.downloader != nil {
-		r.downloader.setLogger(fn)
+	if r.weights != nil {
+		r.weights.SetLogger(fn)
 	}
 }
 
@@ -215,7 +220,7 @@ func (r *modelRunner) Configure(cfg config.ModelConfig) {
 	r.mu.Unlock()
 
 	if !cfg.Enabled || dirChanged || backendChanged || prevMirror != cfg.Mirror {
-		r.downloader.Reset()
+		r.weights.Reset()
 	}
 	if dirChanged || backendChanged {
 		if prevDir != "" {
@@ -229,14 +234,14 @@ func (r *modelRunner) Configure(cfg config.ModelConfig) {
 	if cfg.Enabled && !cfg.IsRemoteHTTP() {
 		if cfg.EffectiveAutoDownload() {
 			r.maybeDownload(cfg)
-		} else if !modelInstalled(nextDir) {
+		} else if _, _, installed := r.weights.Resolve(nextDir); !installed {
 			r.warnMissingWeights(cfg, nextDir)
 		}
 	}
 }
 
 func (r *modelRunner) Close() {
-	r.downloader.Cancel()
+	r.weights.Cancel()
 
 	r.mu.Lock()
 	dir := r.cfg.EffectiveDir()
@@ -283,7 +288,7 @@ func (r *modelRunner) Status() ModelStatus {
 		}
 	}
 
-	dlActive, dlDone, dlTotal, dlErr := r.downloader.status()
+	dlActive, dlDone, dlTotal, dlErr := r.weights.Status()
 	behind := false
 	if t := r.behindAt.Load(); t != 0 && time.Since(time.Unix(0, t)) < behindAge {
 		behind = true
@@ -301,7 +306,7 @@ func (r *modelRunner) Status() ModelStatus {
 		}
 	} else {
 		revision = guard.Rev[:12]
-		resolvedDir, layout, installed = resolveModelDirWithLayout(dir)
+		resolvedDir, layout, installed = r.weights.Resolve(dir)
 		if !cfg.Enabled && !installed {
 			layout = "disabled"
 		}
@@ -361,51 +366,31 @@ func (r *modelRunner) warnMissingWeights(cfg config.ModelConfig, dir string) {
 	})
 }
 
-func (r *modelRunner) TriggerDownload(mirrorOverride string) error {
+func (r *modelRunner) clearLoadError(dir string, resetMissing bool) {
 	r.mu.Lock()
-	cfg := r.cfg
-	r.mu.Unlock()
-	if cfg.IsRemoteHTTP() {
-		return errors.New("model download is only supported for local astrlink-guard")
-	}
-	dir := cfg.EffectiveDir()
-	if dir == "" {
-		return errors.New("model directory could not be resolved; set model.dir or CPA_REDUCTANT_MODEL_DIR")
-	}
-	if modelInstalled(dir) {
-		r.mu.Lock()
+	if r.cfg.EffectiveDir() == dir {
 		r.lastErr = nil
 		r.fails = 0
 		r.retryAt = time.Time{}
-		r.mu.Unlock()
-		return nil
-	}
-	mirror := strings.TrimSpace(mirrorOverride)
-	if mirror == "" {
-		mirror = cfg.Mirror
-	}
-	r.downloader.ForceAsync(dir, mirror, func() {
-		r.mu.Lock()
-		if r.cfg.EffectiveDir() == dir {
-			r.lastErr = nil
-			r.fails = 0
-			r.retryAt = time.Time{}
+		if resetMissing {
 			r.missingWarned = false
 		}
-		r.mu.Unlock()
-	})
-	return nil
+	}
+	r.mu.Unlock()
 }
 
 func (r *modelRunner) maybeDownload(cfg config.ModelConfig) {
-	if !cfg.Enabled || !cfg.EffectiveAutoDownload() || r.downloader == nil {
+	if !cfg.Enabled || !cfg.EffectiveAutoDownload() || r.weights == nil {
 		return
 	}
 	dir := cfg.EffectiveDir()
-	if dir == "" || modelInstalled(dir) {
+	if dir == "" {
 		return
 	}
-	r.downloader.EnsureAsync(dir, cfg.Mirror, func() {
+	if _, _, installed := r.weights.Resolve(dir); installed {
+		return
+	}
+	r.weights.EnsureAsync(dir, cfg.Mirror, func() {
 		r.mu.Lock()
 		if r.cfg.Enabled && r.cfg.EffectiveDir() == dir {
 			r.lastErr = nil
@@ -414,57 +399,6 @@ func (r *modelRunner) maybeDownload(cfg config.ModelConfig) {
 		}
 		r.mu.Unlock()
 	})
-}
-
-func modelInstalled(dir string) bool {
-	_, ok := resolveModelDir(dir)
-	return ok
-}
-
-// resolveModelDir locates the directory containing the model weights: first
-// checking the pinned revision subdirectory (<dir>/<rev[:12]>, matching
-// Magpie's layout and ensuring exact pinned byte sizes), then falling back to
-// flat files directly inside <dir> for manual placement.
-func resolveModelDir(dir string) (string, bool) {
-	resolved, _, ok := resolveModelDirWithLayout(dir)
-	return resolved, ok
-}
-
-func resolveModelDirWithLayout(dir string) (string, string, bool) {
-	if dir == "" {
-		return "", "missing", false
-	}
-	vdir := versionedModelDir(dir)
-	if hasPinnedFiles(vdir) {
-		return vdir, "versioned", true
-	}
-	if hasFlatFiles(dir) {
-		return dir, "flat", true
-	}
-	return "", "missing", false
-}
-
-func hasPinnedFiles(dir string) bool {
-	if dir == "" {
-		return false
-	}
-	for _, f := range guard.PinnedFiles {
-		fi, err := os.Stat(filepath.Join(dir, filepath.Base(f.Path)))
-		if err != nil || fi.IsDir() || fi.Size() != f.Size {
-			return false
-		}
-	}
-	return true
-}
-
-func hasFlatFiles(dir string) bool {
-	for _, rel := range guard.Files {
-		fi, err := os.Stat(filepath.Join(dir, filepath.Base(rel)))
-		if err != nil || fi.IsDir() || fi.Size() == 0 {
-			return false
-		}
-	}
-	return true
 }
 
 func retryBackoff(fails int) time.Duration {
@@ -500,29 +434,15 @@ func (r *modelRunner) Generation(cfg config.ModelConfig) string {
 		return gen
 	}
 	r.mu.Unlock()
-	loadDir, ok := resolveModelDir(dir)
+	loadDir, _, ok := r.weights.Resolve(dir)
 	if !ok {
 		return "pending|" + cfg.EffectiveName() + "|" + dir
 	}
-	return localModelGeneration(cfg, loadDir)
+	return r.localModelGeneration(cfg, loadDir)
 }
 
-func localModelGeneration(cfg config.ModelConfig, loadDir string) string {
-	return "local|" + cfg.EffectiveName() + "|" + loadDir + "|" + guard.Rev[:12] + "|" + modelDirStamp(loadDir)
-}
-
-func modelDirStamp(dir string) string {
-	h := sha256.New()
-	for _, rel := range guard.Files {
-		name := filepath.Base(rel)
-		fi, err := os.Stat(filepath.Join(dir, name))
-		if err != nil {
-			continue
-		}
-		fmt.Fprintf(h, "%s:%d:%d\n", name, fi.Size(), fi.ModTime().UnixNano())
-	}
-	sum := h.Sum(nil)
-	return fmt.Sprintf("%x", sum[:6])
+func (r *modelRunner) localModelGeneration(cfg config.ModelConfig, loadDir string) string {
+	return "local|" + cfg.EffectiveName() + "|" + loadDir + "|" + guard.Rev[:12] + "|" + r.weights.Stamp(loadDir)
 }
 
 func (r *modelRunner) ensureModel(cfg config.ModelConfig) (spanFinder, error) {
@@ -562,7 +482,7 @@ func (r *modelRunner) ensureModel(cfg config.ModelConfig) (spanFinder, error) {
 	loader := r.loader
 	r.mu.Unlock()
 
-	loadDir, ok := resolveModelDir(dir)
+	loadDir, _, ok := r.weights.Resolve(dir)
 	if !ok {
 		if cfg.EffectiveAutoDownload() {
 			r.maybeDownload(cfg)
@@ -587,7 +507,7 @@ func (r *modelRunner) ensureModel(cfg config.ModelConfig) (spanFinder, error) {
 	}
 	r.loaded = m
 	r.loadedDir = dir
-	r.loadedGen = localModelGeneration(cfg, loadDir)
+	r.loadedGen = r.localModelGeneration(cfg, loadDir)
 	r.lastErr = nil
 	r.fails = 0
 	r.retryAt = time.Time{}

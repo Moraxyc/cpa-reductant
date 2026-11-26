@@ -314,6 +314,7 @@ func (s *engineStats) snapshot() StatsSnapshot {
 // Engine schedules redaction and restoration primitives exposed from Magpie.
 type Engine struct {
 	cfg       atomic.Pointer[config.Config]
+	weights   *modelDownloader
 	model     *modelRunner
 	stats     engineStats
 	events    *eventRing
@@ -341,8 +342,10 @@ func New(cfg *config.Config) *Engine {
 	if keyPath != "" {
 		redact.SetKeyPath(keyPath)
 	}
+	weights := newModelDownloader()
 	e := &Engine{
-		model:          newModelRunner(cfg.EffectiveModelRunnerConfig()),
+		weights:        weights,
+		model:          newModelRunnerWithWeights(cfg.EffectiveModelRunnerConfig(), weights),
 		events:         newEventRing(defaultEventRing),
 		capture:        newDebugCapture(defaultCaptureCapacity),
 		scopes:         newScopeVault(defaultScopeMaxScopes, defaultScopeMaxEntries, cfg.EffectiveScopeTTL()),
@@ -438,10 +441,12 @@ func (e *Engine) Update(cfg *config.Config) {
 }
 
 func (e *Engine) TriggerModelDownload(mirror string) (ModelStatus, error) {
-	if e == nil || e.model == nil {
+	if e == nil || e.weights == nil || e.model == nil {
 		return ModelStatus{}, errors.New("model runner not initialized")
 	}
-	if err := e.model.TriggerDownload(mirror); err != nil {
+	if err := e.weights.Trigger(e.Config().EffectiveModelRunnerConfig(), mirror, func(dir string) {
+		e.model.clearLoadError(dir, true)
+	}); err != nil {
 		return e.ModelStatus(), err
 	}
 	return e.ModelStatus(), nil
