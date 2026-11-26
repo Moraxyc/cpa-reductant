@@ -414,7 +414,14 @@ func (p *Plugin) handleManagement(req pluginapi.ManagementRequest) pluginapi.Man
 				baseURL = managementBasePath + managementStatusPath + "?format=html"
 			}
 			explicitLang, _ := normalizeLocale(req.Query.Get("lang"))
-			return renderDashboardHTML(st, baseURL, actionFilter, eventLimit, refreshSec, resolveLocale(req), explicitLang)
+			routes := dashboardRoutes{
+				Base:         baseURL,
+				JSON:         managementBasePath + managementStatusPath + "?format=json",
+				Metrics:      managementBasePath + managementMetricsPath,
+				Preview:      managementBasePath + managementPreviewPath,
+				DebugCapture: managementBasePath + managementDebugCapturePath,
+			}
+			return renderDashboardHTML(st, routes, actionFilter, eventLimit, refreshSec, resolveLocale(req), explicitLang)
 		}
 		return jsonManagementResponse(http.StatusOK, st)
 	case method == http.MethodGet && path == managementMetricsPath:

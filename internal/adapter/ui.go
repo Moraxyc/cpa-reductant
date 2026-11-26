@@ -162,7 +162,15 @@ func renderPortalHTML(locale string) pluginapi.ManagementResponse {
 	}
 }
 
-func renderDashboardHTML(st engine.Status, baseURL, actionFilter string, eventLimit, refreshSec int, locale, explicitLang string) pluginapi.ManagementResponse {
+type dashboardRoutes struct {
+	Base         string
+	JSON         string
+	Metrics      string
+	Preview      string
+	DebugCapture string
+}
+
+func renderDashboardHTML(st engine.Status, routes dashboardRoutes, actionFilter string, eventLimit, refreshSec int, locale, explicitLang string) pluginapi.ManagementResponse {
 	tr := newTranslator(locale)
 	healthLabel, healthClass := deriveHealth(st, tr)
 	dlPct := 0.0
@@ -172,11 +180,11 @@ func renderDashboardHTML(st engine.Status, baseURL, actionFilter string, eventLi
 
 	data := uiViewData{
 		Status:          st,
-		BaseURL:         buildDashboardLink(baseURL, actionFilter, refreshSec, explicitLang),
-		JSONURL:         managementBasePath + managementStatusPath + "?format=json",
-		MetricsURL:      managementBasePath + managementMetricsPath,
-		PreviewURL:      managementBasePath + managementPreviewPath,
-		DebugCaptureURL: managementBasePath + managementDebugCapturePath,
+		BaseURL:         buildDashboardLink(routes.Base, actionFilter, refreshSec, explicitLang),
+		JSONURL:         routes.JSON,
+		MetricsURL:      routes.Metrics,
+		PreviewURL:      routes.Preview,
+		DebugCaptureURL: routes.DebugCapture,
 		ActionFilter:    actionFilter,
 		EventLimit:      eventLimit,
 		HealthLabel:     healthLabel,
@@ -194,13 +202,13 @@ func renderDashboardHTML(st engine.Status, baseURL, actionFilter string, eventLi
 		ModelRows:       buildDimRows(st.Stats.ByModel),
 		HasEvents:       len(st.RecentEvents) > 0,
 		RefreshSeconds:  refreshSec,
-		RefreshLink:     buildDashboardLink(baseURL, actionFilter, 5, explicitLang),
-		StopRefreshLink: buildDashboardLink(baseURL, actionFilter, 0, explicitLang),
+		RefreshLink:     buildDashboardLink(routes.Base, actionFilter, 5, explicitLang),
+		StopRefreshLink: buildDashboardLink(routes.Base, actionFilter, 0, explicitLang),
 		Locale:          tr.Locale(),
 		Locales:         supportedLocales,
 		LangCookieName:  langCookieName,
 		MessagesJSON:    tr.MessagesJSON(),
-		rawBaseURL:      baseURL,
+		rawBaseURL:      routes.Base,
 		explicitLang:    explicitLang,
 		tr:              tr,
 	}
