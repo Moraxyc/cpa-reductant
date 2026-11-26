@@ -936,3 +936,73 @@ func TestModelGenerationReevaluatesOnConfigAndWeightChanges(t *testing.T) {
 		t.Fatalf("expected distinct HTTP ModelGeneration values, got %q vs %q", genHTTP1, genHTTP2)
 	}
 }
+
+type fakeBackendSpanFinder struct {
+	fn     func(text string) []guard.Span
+	via    string
+	device string
+	err    error
+}
+
+func (f fakeBackendSpanFinder) Find(text string) []guard.Span {
+	if f.fn == nil {
+		return nil
+	}
+	return f.fn(text)
+}
+
+func (f fakeBackendSpanFinder) Backend() (string, string, error) {
+	return f.via, f.device, f.err
+}
+
+func TestModelStatusReportsInferenceBackend(t *testing.T) {
+	dir := writeMarkerModelDir(t)
+	eng := New(&config.Config{
+		Model: config.ModelConfig{
+			Enabled: true,
+			Dir:     dir,
+		},
+	})
+	defer eng.Close()
+
+	// Before first load, backend fields are empty.
+	if st := eng.ModelStatus(); st.Loaded || st.BackendVia != "" || st.BackendDevice != "" || st.BackendError != "" {
+		t.Fatalf("expected unloaded status with empty backend, got %+v", st)
+	}
+
+	eng.model.loader = func(string) (spanFinder, error) {
+		return fakeBackendSpanFinder{
+			via:    "Level Zero",
+			device: "Intel(R) AI Boost",
+		}, nil
+	}
+	if _, err := eng.MaskJSON("backend-route", []byte(`{"messages":[{"role":"user","content":"hello world"}]}`)); err != nil {
+		t.Fatalf("MaskJSON: %v", err)
+	}
+	st := eng.ModelStatus()
+	if !st.Loaded || st.BackendVia != "Level Zero" || st.BackendDevice != "Intel(R) AI Boost" || st.BackendError != "" {
+		t.Fatalf("unexpected backend status for NPU: %+v", st)
+	}
+
+	// Simulate fallback to CPU with a backend error on a new directory.
+	dir2 := writeMarkerModelDir(t)
+	eng.model.loader = func(string) (spanFinder, error) {
+		return fakeBackendSpanFinder{
+			device: "CPU",
+			err:    errors.New("NPU compile failed"),
+		}, nil
+	}
+	eng.Update(&config.Config{
+		Model: config.ModelConfig{
+			Enabled: true,
+			Dir:     dir2,
+		},
+	})
+	if _, err := eng.MaskJSON("backend-route-2", []byte(`{"messages":[{"role":"user","content":"hello fallback"}]}`)); err != nil {
+		t.Fatalf("MaskJSON dir2: %v", err)
+	}
+	st2 := eng.ModelStatus()
+	if !st2.Loaded || st2.BackendVia != "" || st2.BackendDevice != "CPU" || st2.BackendError != "NPU compile failed" {
+		t.Fatalf("unexpected fallback backend status: %+v", st2)
+	}
+}

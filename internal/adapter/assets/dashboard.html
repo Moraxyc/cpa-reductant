@@ -85,7 +85,7 @@
       <div class="kv-item"><div class="kv-label">{{.T "model.expected_dir"}}</div><div class="kv-val">{{if .Status.Model.Dir}}{{.Status.Model.Dir}}{{else}}-{{end}}</div></div>
       <div class="kv-item"><div class="kv-label">{{.T "model.loaded_path"}}</div><div class="kv-val">{{if .Status.Model.ResolvedDir}}{{.Status.Model.ResolvedDir}} ({{.Status.Model.Layout}}){{else}}{{.Status.Model.Layout}}{{end}}</div></div>
       <div class="kv-item"><div class="kv-label">{{.T "model.settings"}}</div><div class="kv-val">enabled={{.Status.Model.Enabled}} · auto_download={{.Status.Model.AutoDownload}} · strict={{.Status.Model.Strict}}</div></div>
-      <div class="kv-item"><div class="kv-label">{{.T "model.parameters"}}</div><div class="kv-val">min_score={{.Status.Model.MinScore}} · wait={{.Status.Model.WaitMS}}ms · rev={{.Status.Model.Revision}}</div></div>
+      <div class="kv-item"><div class="kv-label">{{.T "model.parameters"}}</div><div class="kv-val">min_score={{.Status.Model.MinScore}} · wait={{.Status.Model.WaitMS}}ms · rev={{.Status.Model.Revision}}{{if or .Status.Model.BackendVia .Status.Model.BackendDevice}} · backend={{if .Status.Model.BackendVia}}{{.Status.Model.BackendVia}}{{if .Status.Model.BackendDevice}}/{{.Status.Model.BackendDevice}}{{end}}{{else}}{{.Status.Model.BackendDevice}}{{end}}{{if .Status.Model.BackendError}} ({{.Status.Model.BackendError}}){{end}}{{end}}</div></div>
     </div>
     {{if .Status.Model.Downloading}}
     <div style="margin-top:10px">

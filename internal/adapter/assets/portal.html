@@ -659,11 +659,16 @@ body.embedded .auth-wrap{margin-top:12px}
     dlBtn.classList.toggle('hidden', !(!m.installed && !m.downloading));
     dlBtn.textContent = m.download_error ? t('model.retry_download') : t('model.download');
 
+    var backendLabel = '';
+    if(m.backend_via || m.backend_device){
+      backendLabel = ' · backend=' + (m.backend_via ? (m.backend_device ? (m.backend_via + '/' + m.backend_device) : m.backend_via) : m.backend_device);
+      if(m.backend_error) backendLabel += ' (' + m.backend_error + ')';
+    }
     document.getElementById('model-details').innerHTML = [
       [t('model.directory'), m.dir || t('model.no_directory')],
       [t('model.loaded_path'), m.resolved_dir ? (m.resolved_dir + ' (' + (m.layout || '-') + ')') : (m.layout || 'missing')],
       [t('model.settings'), 'enabled=' + (!!m.enabled) + ' · auto_download=' + (!!m.auto_download) + ' · strict=' + (!!m.strict)],
-      [t('model.parameters_portal'), 'min_score=' + (m.min_score || 0.8) + ' · wait=' + (m.wait_ms || 2000) + 'ms · rev=' + (m.revision || '-')]
+      [t('model.parameters_portal'), 'min_score=' + (m.min_score || 0.8) + ' · wait=' + (m.wait_ms || 2000) + 'ms · rev=' + (m.revision || '-') + backendLabel]
     ].map(function(kv){
       return '<div class="kv-item"><div class="kv-label">' + esc(kv[0]) + '</div><div class="kv-val">' + esc(kv[1]) + '</div></div>';
     }).join('');

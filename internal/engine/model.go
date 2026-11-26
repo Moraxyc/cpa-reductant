@@ -40,6 +40,12 @@ type spanFinder interface {
 	Find(text string) []guard.Span
 }
 
+type backendReporter interface {
+	Backend() (via, device string, err error)
+}
+
+var _ backendReporter = (*guard.Model)(nil)
+
 // ModelStatus exposes runtime observability for the local PII model.
 type ModelStatus struct {
 	Enabled         bool           `json:"enabled"`
@@ -57,6 +63,9 @@ type ModelStatus struct {
 	Layout          string         `json:"layout,omitempty"`
 	Installed       bool           `json:"installed"`
 	Loaded          bool           `json:"loaded"`
+	BackendVia      string         `json:"backend_via,omitempty"`
+	BackendDevice   string         `json:"backend_device,omitempty"`
+	BackendError    string         `json:"backend_error,omitempty"`
 	Cores           int            `json:"cores,omitempty"`
 	Downloading     bool           `json:"downloading,omitempty"`
 	DownloadDone    int64          `json:"download_done,omitempty"`
@@ -248,6 +257,10 @@ func (r *modelRunner) Status() ModelStatus {
 	cfg := r.cfg
 	dir := cfg.EffectiveDir()
 	loaded := r.loaded != nil && r.loadedDir == dir
+	var loadedModel spanFinder
+	if loaded {
+		loadedModel = r.loaded
+	}
 	fails := r.fails
 	var retryAt string
 	if !r.retryAt.IsZero() && time.Now().Before(r.retryAt) {
@@ -259,6 +272,16 @@ func (r *modelRunner) Status() ModelStatus {
 	}
 	cores := cap(r.turn)
 	r.mu.Unlock()
+
+	var backendVia, backendDevice, backendErr string
+	if reporter, ok := loadedModel.(backendReporter); ok {
+		via, device, berr := reporter.Backend()
+		backendVia = via
+		backendDevice = device
+		if berr != nil {
+			backendErr = berr.Error()
+		}
+	}
 
 	dlActive, dlDone, dlTotal, dlErr := r.downloader.status()
 	behind := false
@@ -299,6 +322,9 @@ func (r *modelRunner) Status() ModelStatus {
 		Layout:          layout,
 		Installed:       installed,
 		Loaded:          loaded,
+		BackendVia:      backendVia,
+		BackendDevice:   backendDevice,
+		BackendError:    backendErr,
 		Cores:           cores,
 		Downloading:     dlActive,
 		DownloadDone:    dlDone,
