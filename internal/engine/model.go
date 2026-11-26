@@ -537,6 +537,103 @@ func findSafe(ctx context.Context, m spanFinder, text string) (spans []guard.Spa
 	return m.Find(text), nil
 }
 
+// FindDryRun analyzes texts under ctx for dry-run previews without mutating
+// production cache/disk state, sentSet backlog tracking, behind circuit-breaker
+// timestamps, or telemetry counters.
+func (r *modelRunner) FindDryRun(ctx context.Context, cfg config.ModelConfig, texts []string) ([][]redact.Found, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	dir := cfg.EffectiveDir()
+	r.disk.loadOnce(dir, r.cache)
+
+	out, miss := r.knownWith(texts, false)
+	if len(miss) == 0 {
+		return filterByScore(out, cfg.EffectiveMinScore()), nil
+	}
+
+	m, err := r.ensureModel(cfg)
+	if err != nil {
+		if cfg.Strict {
+			return nil, err
+		}
+		return filterByScore(out, cfg.EffectiveMinScore()), nil
+	}
+
+	wait := r.effectiveWait(cfg)
+	var cancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		ctx, cancel = context.WithTimeout(ctx, wait)
+		defer cancel()
+	}
+
+	local := make(map[[32]byte][]redact.Found)
+	var units []string
+	var unitKeys [][32]byte
+	for _, idx := range miss {
+		t := texts[idx]
+		for _, p := range cutChunks(t, guardChunkSize) {
+			sub := t[p.at:p.end]
+			k := sha256.Sum256([]byte(sub))
+			if fs, ok := r.cache.peek(k); ok && spansFit(fs, sub) {
+				continue
+			}
+			if _, ok := local[k]; ok {
+				continue
+			}
+			local[k] = nil
+			units = append(units, sub)
+			unitKeys = append(unitKeys, k)
+		}
+	}
+
+	leftBytes := make([]int, len(units)+1)
+	for i := len(units) - 1; i >= 0; i-- {
+		leftBytes[i] = leftBytes[i+1] + len(units[i])
+	}
+
+	for i, piece := range units {
+		if ctx.Err() != nil {
+			break
+		}
+		found, ferr := r.analyzePieceReadOnly(ctx, m, piece, leftBytes[i])
+		if ferr != nil {
+			if errors.Is(ferr, context.DeadlineExceeded) || errors.Is(ferr, context.Canceled) {
+				break
+			}
+			if cfg.Strict {
+				return nil, fmt.Errorf("%w: %v", ErrModelUnavailable, ferr)
+			}
+			break
+		}
+		local[unitKeys[i]] = found
+	}
+
+	for _, idx := range miss {
+		t := texts[idx]
+		ps := cutChunks(t, guardChunkSize)
+		var all []redact.Found
+		for _, p := range ps {
+			sub := t[p.at:p.end]
+			k := sha256.Sum256([]byte(sub))
+			fs, ok := r.cache.peek(k)
+			if !ok || !spansFit(fs, sub) {
+				fs = local[k]
+			}
+			for _, f := range fs {
+				all = append(all, redact.Found{
+					Start: f.Start + p.at,
+					End:   f.End + p.at,
+					Label: f.Label,
+					Score: f.Score,
+				})
+			}
+		}
+		out[idx] = spreadFound(t, mergeFound(all))
+	}
+	return filterByScore(out, cfg.EffectiveMinScore()), nil
+}
+
 // Find analyzes texts up to effectiveWait(cfg) under ctx. New pieces are
 // prioritized ahead of previously-sent backlog pieces; non-strict requests
 // cap backlog work per request while strict requests return once all new
@@ -741,6 +838,55 @@ func (r *modelRunner) analyzePiece(ctx context.Context, m spanFinder, piece stri
 	}
 }
 
+func (r *modelRunner) analyzePieceReadOnly(ctx context.Context, m spanFinder, piece string, priorityLeftBytes int) ([]redact.Found, error) {
+	if !r.takeTurn(ctx, priorityLeftBytes) {
+		return nil, ctx.Err()
+	}
+
+	type pieceResult struct {
+		found []redact.Found
+		err   error
+	}
+	done := make(chan pieceResult, 1)
+	go func() {
+		defer func() {
+			<-r.turn
+		}()
+		spans, err := findSafe(ctx, m, piece)
+		if err != nil {
+			done <- pieceResult{err: err}
+			return
+		}
+		found := make([]redact.Found, 0, len(spans))
+		for _, s := range spans {
+			if s.Start < 0 || s.End > len(piece) || s.Start >= s.End {
+				continue
+			}
+			found = append(found, redact.Found{
+				Start: s.Start,
+				End:   s.End,
+				Label: mapGuardLabel(s.Label),
+				Score: float64(float32(s.Score)),
+			})
+		}
+		done <- pieceResult{found: found}
+	}()
+
+	select {
+	case res := <-done:
+		return res.found, res.err
+	case <-ctx.Done():
+		t := time.NewTimer(handBack)
+		defer t.Stop()
+		select {
+		case res := <-done:
+			return res.found, res.err
+		case <-t.C:
+			return nil, ctx.Err()
+		}
+	}
+}
+
 func (r *modelRunner) takeTurn(ctx context.Context, left int) bool {
 	r.waiting.Add(1)
 	defer r.waiting.Add(-1)
@@ -767,13 +913,21 @@ func (r *modelRunner) takeTurn(ctx context.Context, left int) bool {
 }
 
 func (r *modelRunner) known(texts []string) (out [][]redact.Found, miss []int) {
+	return r.knownWith(texts, true)
+}
+
+func (r *modelRunner) knownWith(texts []string, mutate bool) (out [][]redact.Found, miss []int) {
 	out = make([][]redact.Found, len(texts))
+	lookup := r.cache.peek
+	if mutate {
+		lookup = r.cache.get
+	}
 	for i, t := range texts {
 		if t == "" {
 			continue
 		}
 		k := sha256.Sum256([]byte(t))
-		if fs, ok := r.cache.get(k); ok && spansFit(fs, t) {
+		if fs, ok := lookup(k); ok && spansFit(fs, t) {
 			out[i] = fs
 			continue
 		}
@@ -786,7 +940,7 @@ func (r *modelRunner) known(texts []string) (out [][]redact.Found, miss []int) {
 		complete := true
 		for _, p := range ps {
 			sub := t[p.at:p.end]
-			fs, ok := r.cache.get(sha256.Sum256([]byte(sub)))
+			fs, ok := lookup(sha256.Sum256([]byte(sub)))
 			if !ok || !spansFit(fs, sub) {
 				complete = false
 				continue
@@ -803,7 +957,9 @@ func (r *modelRunner) known(texts []string) (out [][]redact.Found, miss []int) {
 		merged := spreadFound(t, mergeFound(all))
 		out[i] = merged
 		if complete {
-			r.cache.put(k, merged)
+			if mutate {
+				r.cache.put(k, merged)
+			}
 		} else {
 			miss = append(miss, i)
 		}
@@ -1115,6 +1271,16 @@ func (c *textLRU) len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.ll.Len()
+}
+
+func (c *textLRU) peek(k [32]byte) ([]redact.Found, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.m[k]
+	if !ok {
+		return nil, false
+	}
+	return e.Value.(*lruEntry).fs, true
 }
 
 func (c *textLRU) get(k [32]byte) ([]redact.Found, bool) {

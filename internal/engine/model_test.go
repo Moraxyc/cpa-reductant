@@ -1006,3 +1006,70 @@ func TestModelStatusReportsInferenceBackend(t *testing.T) {
 		t.Fatalf("unexpected fallback backend status: %+v", st2)
 	}
 }
+
+func TestPreviewDryRunDoesNotMutateModelState(t *testing.T) {
+	dir := writeMarkerModelDir(t)
+	eng := New(&config.Config{
+		Model: config.ModelConfig{
+			Enabled: true,
+			Dir:     dir,
+			Strict:  true,
+			WaitMS:  30,
+		},
+	})
+	defer eng.Close()
+
+	var delay time.Duration
+	var mu sync.Mutex
+	eng.model.loader = func(string) (spanFinder, error) {
+		return fakeSpanFinder{fn: func(text string) []guard.Span {
+			mu.Lock()
+			d := delay
+			mu.Unlock()
+			if d > 0 {
+				time.Sleep(d)
+			}
+			if idx := strings.Index(text, "Alice Smith"); idx >= 0 {
+				return []guard.Span{{Start: idx, End: idx + len("Alice Smith"), Label: "private_person", Score: 0.95}}
+			}
+			return nil
+		}}, nil
+	}
+
+	// 1. Successful dry-run preview masks PII without mutating cache, sentSet, or telemetry counters.
+	res, err := eng.PreviewWithOptions(context.Background(), PreviewRequest{
+		Text: "Please contact Alice Smith",
+		Mode: PreviewModeText,
+	})
+	if err != nil {
+		t.Fatalf("PreviewWithOptions: %v", err)
+	}
+	if strings.Contains(res.Masked, "Alice Smith") || !strings.Contains(res.Masked, "{{PERSON_") {
+		t.Fatalf("expected Alice Smith masked in preview, got %q", res.Masked)
+	}
+	st := eng.ModelStatus()
+	if st.CacheEntries != 0 || st.CacheHits != 0 || st.CacheMisses != 0 || st.PartialTimeouts != 0 || st.Behind || st.InferLatency.Count != 0 {
+		t.Fatalf("preview mutated model state/telemetry: %+v", st)
+	}
+	eng.model.sent.mu.Lock()
+	sentCount := len(eng.model.sent.cur) + len(eng.model.sent.prev)
+	eng.model.sent.mu.Unlock()
+	if sentCount != 0 {
+		t.Fatalf("expected preview not to mark sentSet, got %d entries", sentCount)
+	}
+
+	// 2. Timed-out dry-run preview must not trip strict Behind breaker or increment PartialTimeouts.
+	mu.Lock()
+	delay = 80 * time.Millisecond
+	mu.Unlock()
+	if _, err := eng.PreviewWithOptions(context.Background(), PreviewRequest{
+		Text: "Timeout preview for Alice Smith",
+		Mode: PreviewModeText,
+	}); err != nil {
+		t.Fatalf("timeout preview err: %v", err)
+	}
+	stAfter := eng.ModelStatus()
+	if stAfter.PartialTimeouts != 0 || stAfter.Behind || stAfter.InferLatency.Count != 0 {
+		t.Fatalf("timeout preview mutated partialTimeouts/behind/latency: %+v", stAfter)
+	}
+}

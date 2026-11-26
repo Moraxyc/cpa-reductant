@@ -65,12 +65,12 @@ func (e *Engine) PreviewWithOptions(ctx context.Context, req PreviewRequest) (re
 	var hits []redact.Hit
 	var modelErr error
 	blocked := false
-	options := e.redactOptions(ctx, cfg, "", func(hit redact.Hit) {
+	options := e.redactOptionsWithMode(ctx, cfg, "", func(hit redact.Hit) {
 		hits = append(hits, hit)
 		if hit.Action == redact.Block {
 			blocked = true
 		}
-	}, &modelErr)
+	}, &modelErr, true)
 
 	defer func() {
 		if rec := recover(); rec != nil {

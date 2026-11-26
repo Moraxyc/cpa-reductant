@@ -581,6 +581,10 @@ func (e *Engine) scopeStats(enabled bool) ScopeStats {
 }
 
 func (e *Engine) redactOptions(ctx context.Context, cfg *config.Config, route string, seen func(redact.Hit), modelErr *error) redact.Options {
+	return e.redactOptionsWithMode(ctx, cfg, route, seen, modelErr, false)
+}
+
+func (e *Engine) redactOptionsWithMode(ctx context.Context, cfg *config.Config, route string, seen func(redact.Hit), modelErr *error, dryRun bool) redact.Options {
 	options := redact.Options{
 		Secrets:      cfg.EffectiveSecrets(),
 		Personal:     cfg.EffectivePersonal(),
@@ -600,7 +604,15 @@ func (e *Engine) redactOptions(ctx context.Context, cfg *config.Config, route st
 		options.NamesByModel = !cfg.Model.IsRemoteHTTP() && cfg.Model.EffectiveName() == config.ModelAstrLinkGuard
 		options.ModelGeneration = e.model.Generation(cfg.Model)
 		options.Model = func(texts []string) [][]redact.Found {
-			found, ferr := e.model.Find(ctx, cfg.Model, texts)
+			var (
+				found [][]redact.Found
+				ferr  error
+			)
+			if dryRun {
+				found, ferr = e.model.FindDryRun(ctx, cfg.Model, texts)
+			} else {
+				found, ferr = e.model.Find(ctx, cfg.Model, texts)
+			}
 			if ferr != nil {
 				*modelErr = ferr
 				return make([][]redact.Found, len(texts))
