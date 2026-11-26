@@ -6,8 +6,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"html"
 	"net/http"
+	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -229,7 +232,59 @@ type StreamWriter interface {
 	Put() map[string]int
 }
 
-var scopePlaceholderRE = regexp.MustCompile(`\{\{\s*([A-Za-z][A-Za-z0-9_]*_[A-Za-z2-7]{8})\s*\}\}|\b([A-Za-z][A-Za-z0-9_]*_[A-Za-z2-7]{8})\b`)
+var scopePlaceholderBodyRE = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_]*_[A-Za-z2-7]{8}`)
+
+type scopePlaceholderMatch struct {
+	start int
+	end   int
+	canon string
+}
+
+func isScopeASCIILetter(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
+
+func isScopeWordByte(c byte) bool {
+	return isScopeASCIILetter(c) || (c >= '0' && c <= '9') || c == '_'
+}
+
+// scopeEncodedBefore mirrors Magpie's redact.encodedBefore so percent-encoded
+// braces (%7B/%7b) and optional %20 spaces before a placeholder body are
+// recognized as non-word boundaries.
+func scopeEncodedBefore(pre []byte) bool {
+	for bytes.HasSuffix(pre, []byte("%20")) {
+		pre = pre[:len(pre)-3]
+	}
+	return len(pre) >= 3 && bytes.EqualFold(pre[len(pre)-3:], []byte("%7B"))
+}
+
+func findScopePlaceholders(p []byte) []scopePlaceholderMatch {
+	if len(p) == 0 || bytes.IndexByte(p, '_') < 0 {
+		return nil
+	}
+	indices := scopePlaceholderBodyRE.FindAllIndex(p, -1)
+	if len(indices) == 0 {
+		return nil
+	}
+	var out []scopePlaceholderMatch
+	last := 0
+	for _, m := range indices {
+		a, z := m[0], m[1]
+		if a >= 2 && p[a-2] == '%' && p[a-1] == '7' && (p[a] == 'B' || p[a] == 'b') && a+1 < z && isScopeASCIILetter(p[a+1]) {
+			a++
+		}
+		if a < last || (a > 0 && isScopeWordByte(p[a-1]) && !scopeEncodedBefore(p[:a])) || (z < len(p) && isScopeWordByte(p[z])) {
+			continue
+		}
+		canon := canonicalPlaceholder(string(p[a:z]))
+		if canon == "" {
+			continue
+		}
+		out = append(out, scopePlaceholderMatch{start: a, end: z, canon: canon})
+		last = z
+	}
+	return out
+}
 
 func canonicalPlaceholder(body string) string {
 	idx := strings.LastIndexByte(body, '_')
@@ -270,7 +325,7 @@ func newScopedStreamWriter(w http.ResponseWriter, vault *scopeVault, scope strin
 		innerBuf:       innerBuf,
 		inner:          redact.NewWriter(innerBuf),
 		bypass:         !vault.HasAny(scope),
-		sentinelPrefix: "__CPASCOPE_" + hex.EncodeToString(rnd[:]) + "_",
+		sentinelPrefix: "@CPASCOPE:" + hex.EncodeToString(rnd[:]) + ":",
 		shields:        make(map[string]string),
 		prevPut:        make(map[string]int),
 		allowedPut:     make(map[string]int),
@@ -286,10 +341,7 @@ func (sw *scopedStreamWriter) WriteHeader(code int) {
 }
 
 func (sw *scopedStreamWriter) shieldUnauthorized(p []byte) []byte {
-	if len(p) == 0 || !bytes.ContainsAny(p, "_") {
-		return p
-	}
-	matches := scopePlaceholderRE.FindAllSubmatchIndex(p, -1)
+	matches := findScopePlaceholders(p)
 	if len(matches) == 0 {
 		return p
 	}
@@ -297,33 +349,24 @@ func (sw *scopedStreamWriter) shieldUnauthorized(p []byte) []byte {
 	last := 0
 	changed := false
 	for _, m := range matches {
-		fullStart, fullEnd := m[0], m[1]
-		bodyStart, bodyEnd := m[2], m[3]
-		if bodyStart < 0 {
-			bodyStart, bodyEnd = m[4], m[5]
-		}
-		canon := canonicalPlaceholder(string(p[bodyStart:bodyEnd]))
-		if canon == "" {
-			continue
-		}
 		// Only shield placeholders that actually exist in Magpie's global store
 		// AND are not authorized for this CallerScope.
-		if _, exists := redact.Value(canon); !exists {
+		if _, exists := redact.Value(m.canon); !exists {
 			continue
 		}
-		if sw.vault.Allows(sw.scope, canon) {
+		if sw.vault.Allows(sw.scope, m.canon) {
 			continue
 		}
 		if !changed {
 			out.Grow(len(p) + 32)
 			changed = true
 		}
-		out.Write(p[last:fullStart])
-		rawMatch := string(p[fullStart:fullEnd])
-		token := sw.sentinelPrefix + hex.EncodeToString([]byte{byte(len(sw.shields) >> 8), byte(len(sw.shields))}) + "__"
-		sw.shields[token] = rawMatch
+		out.Write(p[last:m.start])
+		rawBody := string(p[m.start:m.end])
+		token := sw.sentinelPrefix + hex.EncodeToString([]byte{byte(len(sw.shields) >> 8), byte(len(sw.shields))}) + "@"
+		sw.shields[token] = rawBody
 		out.WriteString(token)
-		last = fullEnd
+		last = m.end
 		sw.vault.recordBlocked(1)
 	}
 	if !changed {
@@ -370,12 +413,42 @@ func (sw *scopedStreamWriter) unshieldAndVerify(emitted []byte) []byte {
 }
 
 func resealValue(b []byte, orig, placeholder string) []byte {
-	out := bytes.ReplaceAll(b, []byte(orig), []byte(placeholder))
-	if encoded, err := json.Marshal(orig); err == nil && len(encoded) >= 2 {
-		escapedOrig := encoded[1 : len(encoded)-1]
-		if !bytes.Equal(escapedOrig, []byte(orig)) {
-			out = bytes.ReplaceAll(out, escapedOrig, []byte(placeholder))
+	if orig == "" {
+		return b
+	}
+	seen := make(map[string]struct{}, 6)
+	var forms []string
+	addForm := func(s string) {
+		if s == "" {
+			return
 		}
+		if _, ok := seen[s]; ok {
+			return
+		}
+		seen[s] = struct{}{}
+		forms = append(forms, s)
+		if encoded, err := json.Marshal(s); err == nil && len(encoded) >= 2 {
+			escaped := string(encoded[1 : len(encoded)-1])
+			if _, ok := seen[escaped]; !ok && escaped != "" {
+				seen[escaped] = struct{}{}
+				forms = append(forms, escaped)
+			}
+		}
+	}
+	addForm(orig)
+	addForm(url.PathEscape(orig))
+	addForm(html.EscapeString(orig))
+	// Replace longer encoded variants first so shorter substrings do not partially match them.
+	sort.Slice(forms, func(i, j int) bool {
+		if len(forms[i]) != len(forms[j]) {
+			return len(forms[i]) > len(forms[j])
+		}
+		return forms[i] < forms[j]
+	})
+	out := b
+	phBytes := []byte(placeholder)
+	for _, form := range forms {
+		out = bytes.ReplaceAll(out, []byte(form), phBytes)
 	}
 	return out
 }
@@ -383,17 +456,9 @@ func resealValue(b []byte, orig, placeholder string) []byte {
 func (sw *scopedStreamWriter) Write(p []byte) (int, error) {
 	if sw.bypass {
 		// Record blocked attempts if the response references a placeholder from another scope.
-		if bytes.ContainsAny(p, "_") {
-			for _, m := range scopePlaceholderRE.FindAllSubmatchIndex(p, -1) {
-				bodyStart, bodyEnd := m[2], m[3]
-				if bodyStart < 0 {
-					bodyStart, bodyEnd = m[4], m[5]
-				}
-				if canon := canonicalPlaceholder(string(p[bodyStart:bodyEnd])); canon != "" {
-					if _, exists := redact.Value(canon); exists {
-						sw.vault.recordBlocked(1)
-					}
-				}
+		for _, m := range findScopePlaceholders(p) {
+			if _, exists := redact.Value(m.canon); exists {
+				sw.vault.recordBlocked(1)
 			}
 		}
 		return sw.dst.Write(p)
