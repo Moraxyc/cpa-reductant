@@ -3,7 +3,7 @@ module github.com/moraxyc/cpa-reductant
 go 1.26.10
 
 require (
-	github.com/router-for-me/CLIProxyAPI/v8 v8.1.1
+	github.com/router-for-me/CLIProxyAPI/v8 v8.1.6
 	github.com/yetone/magpie v0.0.0
 	gopkg.in/yaml.v3 v3.0.1
 )

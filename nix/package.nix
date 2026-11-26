@@ -19,7 +19,7 @@ buildGoModule (finalAttrs: {
     ];
   };
 
-  vendorHash = "sha256-EzlrpPbNYcYNlc4crUlWayrc8UvL5JE56RaSF1XLIKs=";
+  vendorHash = "sha256-BSGauJiOIwLEOW6ZHlmVZnMYjYmLBaB7XfuP7tLzeqo=";
   proxyVendor = true;
 
   postPatch = ''
