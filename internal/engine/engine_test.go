@@ -535,3 +535,58 @@ policies:
 		}
 	}
 }
+
+func TestEnginePreviewJSONMatchesMaskJSONDefinitions(t *testing.T) {
+	word := "SYNTHETIC-DEF-SYNC-WORD"
+	eng := New(&config.Config{
+		Words: []string{word},
+	})
+	defer eng.Close()
+
+	sample := []byte(`{
+		"model": "gpt-5",
+		"stream_options": {"reasoning_summary_delivery": "` + word + `"},
+		"client_metadata": {"turn": "` + word + `"},
+		"output_config": {"format": "` + word + `", "description": "desc ` + word + `"},
+		"reasoning": {"summary": "` + word + `"},
+		"include": ["` + word + `"],
+		"input": [
+			{"type": "additional_tools", "tools": [{"name": "` + word + `", "grammar": "` + word + `", "description": "tool ` + word + `"}]},
+			{"type": "message", "role": "user", "content": "body ` + word + `"}
+		]
+	}`)
+
+	prev, err := eng.PreviewWithOptions(context.Background(), PreviewRequest{
+		Text: string(sample),
+		Mode: PreviewModeJSON,
+	})
+	if err != nil {
+		t.Fatalf("PreviewWithOptions json: %v", err)
+	}
+	masked, err := eng.MaskJSON("preview-parity-route", sample)
+	if err != nil {
+		t.Fatalf("MaskJSON: %v", err)
+	}
+
+	var prevObj, maskedObj any
+	if err := json.Unmarshal([]byte(prev.Masked), &prevObj); err != nil {
+		t.Fatalf("unmarshal preview: %v", err)
+	}
+	if err := json.Unmarshal(masked, &maskedObj); err != nil {
+		t.Fatalf("unmarshal masked: %v", err)
+	}
+	prevNorm, _ := json.Marshal(prevObj)
+	maskedNorm, _ := json.Marshal(maskedObj)
+	if string(prevNorm) != string(maskedNorm) {
+		t.Fatalf("preview JSON diverged from MaskJSON:\npreview: %s\nmasked:  %s", prevNorm, maskedNorm)
+	}
+	// Spot-check that protocol definition values stayed intact while descriptions and user input were masked.
+	if !strings.Contains(prev.Masked, `"reasoning_summary_delivery": "`+word+`"`) ||
+		!strings.Contains(prev.Masked, `"turn": "`+word+`"`) ||
+		!strings.Contains(prev.Masked, `"grammar": "`+word+`"`) {
+		t.Fatalf("expected protocol definition values preserved: %s", prev.Masked)
+	}
+	if strings.Contains(prev.Masked, "desc "+word) || strings.Contains(prev.Masked, "tool "+word) || strings.Contains(prev.Masked, "body "+word) {
+		t.Fatalf("expected descriptions and user content masked: %s", prev.Masked)
+	}
+}

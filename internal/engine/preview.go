@@ -114,8 +114,14 @@ var previewKeptKeys = map[string]bool{
 }
 
 var previewDefKeys = map[string]bool{
-	"tools": true, "functions": true, "tool_choice": true, "toolConfig": true, "tool_config": true,
-	"response_format": true, "generationConfig": true, "generation_config": true, "text": true,
+	"tools": true, "tool_choice": true, "functions": true, "function_call": true, "toolConfig": true, "tool_config": true,
+	"response_format": true, "text": true, "reasoning": true, "include": true, "output_format": true, "output_config": true,
+	"generationConfig": true, "generation_config": true, "stream_options": true, "client_metadata": true,
+}
+
+var previewDefItems = map[string]bool{
+	"additional_tools":   true,
+	"tool_search_output": true,
 }
 
 func isPreviewIDKey(key string) bool {
@@ -138,19 +144,14 @@ func isPreviewSealed(obj map[string]any) bool {
 }
 
 func isPreviewToolArgsKey(objType, parentKey, key string) bool {
-	if key == "arguments" {
-		return true
-	}
-	if key == "input" && strings.HasSuffix(objType, "tool_use") {
-		return true
-	}
-	if key == "args" && (parentKey == "functionCall" || parentKey == "function_call") {
-		return true
-	}
-	if key == "response" && (parentKey == "functionResponse" || parentKey == "function_response") {
-		return true
-	}
-	if strings.HasSuffix(objType, "_call") && (key == "input" || key == "action" || key == "operation") {
+	switch {
+	case strings.HasSuffix(objType, "tool_use"):
+		return key == "input"
+	case strings.HasSuffix(objType, "_call"):
+		return key == "arguments" || key == "input" || key == "action" || key == "operation"
+	case parentKey == "function" || parentKey == "functionCall" || parentKey == "function_call":
+		return key == "arguments" || key == "args"
+	case key == "response" && (parentKey == "functionResponse" || parentKey == "function_response"):
 		return true
 	}
 	return false
@@ -184,6 +185,8 @@ func previewJSON(body []byte, opts redact.Options) ([]byte, error) {
 					} else if _, isObj := v.(map[string]any); isObj {
 						childDefs = true
 					}
+				} else if depth == 2 && parentKey == "input" && k == "tools" && previewDefItems[objType] {
+					childDefs = true
 				}
 				out[k] = walk(v, k, k, depth+1, childArgs, childDefs)
 			}
