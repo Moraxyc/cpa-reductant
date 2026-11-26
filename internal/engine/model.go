@@ -104,6 +104,7 @@ type modelRunner struct {
 	loader        func(dir string) (spanFinder, error)
 	loaded        spanFinder
 	loadedDir     string
+	loadedGen     string
 	lastErr       error
 	fails         int
 	retryAt       time.Time
@@ -192,6 +193,7 @@ func (r *modelRunner) Configure(cfg config.ModelConfig) {
 	if !cfg.Enabled || dirChanged || backendChanged {
 		r.loaded = nil
 		r.loadedDir = ""
+		r.loadedGen = ""
 		r.lastErr = nil
 		r.fails = 0
 		r.retryAt = time.Time{}
@@ -231,6 +233,7 @@ func (r *modelRunner) Close() {
 	dir := r.cfg.EffectiveDir()
 	r.loaded = nil
 	r.loadedDir = ""
+	r.loadedGen = ""
 	r.lastErr = nil
 	r.fails = 0
 	r.retryAt = time.Time{}
@@ -456,6 +459,46 @@ func (r *modelRunner) effectiveWait(cfg config.ModelConfig) time.Duration {
 	return wait
 }
 
+func (r *modelRunner) Generation(cfg config.ModelConfig) string {
+	if !cfg.Enabled {
+		return ""
+	}
+	if cfg.IsRemoteHTTP() {
+		return "http|" + strings.TrimSpace(cfg.Endpoint) + "|" + cfg.EffectiveFormat() + "|" + cfg.EffectiveLanguage()
+	}
+	dir := cfg.EffectiveDir()
+	r.mu.Lock()
+	if r.loaded != nil && r.loadedDir == dir && r.loadedGen != "" {
+		gen := r.loadedGen
+		r.mu.Unlock()
+		return gen
+	}
+	r.mu.Unlock()
+	loadDir, ok := resolveModelDir(dir)
+	if !ok {
+		return "pending|" + cfg.EffectiveName() + "|" + dir
+	}
+	return localModelGeneration(cfg, loadDir)
+}
+
+func localModelGeneration(cfg config.ModelConfig, loadDir string) string {
+	return "local|" + cfg.EffectiveName() + "|" + loadDir + "|" + guard.Rev[:12] + "|" + modelDirStamp(loadDir)
+}
+
+func modelDirStamp(dir string) string {
+	h := sha256.New()
+	for _, rel := range guard.Files {
+		name := filepath.Base(rel)
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(h, "%s:%d:%d\n", name, fi.Size(), fi.ModTime().UnixNano())
+	}
+	sum := h.Sum(nil)
+	return fmt.Sprintf("%x", sum[:6])
+}
+
 func (r *modelRunner) ensureModel(cfg config.ModelConfig) (spanFinder, error) {
 	if cfg.IsRemoteHTTP() {
 		endpoint := strings.TrimSpace(cfg.Endpoint)
@@ -518,6 +561,7 @@ func (r *modelRunner) ensureModel(cfg config.ModelConfig) (spanFinder, error) {
 	}
 	r.loaded = m
 	r.loadedDir = dir
+	r.loadedGen = localModelGeneration(cfg, loadDir)
 	r.lastErr = nil
 	r.fails = 0
 	r.retryAt = time.Time{}

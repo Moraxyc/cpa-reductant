@@ -820,3 +820,119 @@ func TestModelMissingWeightsWarningAndDefaultAutoDownload(t *testing.T) {
 		t.Fatalf("expected TriggerModelDownload on installed dir to succeed, st=%+v err=%v", dlSt, err)
 	}
 }
+
+func TestModelGenerationReevaluatesOnConfigAndWeightChanges(t *testing.T) {
+	dir1 := writeMarkerModelDir(t)
+	dir2 := writeMarkerModelDir(t)
+	const route = "gen-reconfigure-route"
+	const personA = "Mirek Kowalczyk"
+	const personB = "Soraia Lindholm"
+	reqA := []byte(`{"messages":[{"role":"user","content":"Coordinate rollout with ` + personA + ` soon."}]}`)
+	reqB := []byte(`{"messages":[{"role":"user","content":"Coordinate rollout with ` + personB + ` soon."}]}`)
+
+	autoDownloadFalse := false
+	eng := New(&config.Config{
+		Model: config.ModelConfig{
+			Enabled:      true,
+			AutoDownload: &autoDownloadFalse,
+			Dir:          dir1,
+		},
+	})
+	defer eng.Close()
+
+	eng.model.loader = func(loadDir string) (spanFinder, error) {
+		return fakeSpanFinder{fn: func(text string) []guard.Span {
+			if loadDir == dir1 {
+				return nil
+			}
+			var spans []guard.Span
+			for _, name := range []string{personA, personB} {
+				if idx := strings.Index(text, name); idx >= 0 {
+					spans = append(spans, guard.Span{Start: idx, End: idx + len(name), Label: "private_person", Score: 0.95})
+				}
+			}
+			return spans
+		}}, nil
+	}
+
+	// 1. dir1 misses personA; switching to dir2 changes ModelGeneration so same route+text is re-evaluated.
+	out1, err := eng.MaskJSON(route, reqA)
+	if err != nil {
+		t.Fatalf("dir1 MaskJSON: %v", err)
+	}
+	if !strings.Contains(string(out1), personA) {
+		t.Fatalf("expected dir1 blind model to pass %q, got %s", personA, out1)
+	}
+
+	eng.Update(&config.Config{
+		Model: config.ModelConfig{
+			Enabled:      true,
+			AutoDownload: &autoDownloadFalse,
+			Dir:          dir2,
+		},
+	})
+	out2, err := eng.MaskJSON(route, reqA)
+	if err != nil {
+		t.Fatalf("dir2 MaskJSON: %v", err)
+	}
+	if strings.Contains(string(out2), personA) || !strings.Contains(string(out2), "{{PERSON_") {
+		t.Fatalf("expected dir2 ModelGeneration to mask %q afresh, got %s", personA, out2)
+	}
+
+	// 2. Missing weights (pending generation) -> installed weights (local generation) re-evaluates same route+text.
+	pendingDir := filepath.Join(t.TempDir(), "pending-guard")
+	eng.Update(&config.Config{
+		Model: config.ModelConfig{
+			Enabled:      true,
+			AutoDownload: &autoDownloadFalse,
+			Dir:          pendingDir,
+		},
+	})
+	outPending, err := eng.MaskJSON(route, reqB)
+	if err != nil {
+		t.Fatalf("pending MaskJSON: %v", err)
+	}
+	if !strings.Contains(string(outPending), personB) {
+		t.Fatalf("expected pending weights to pass %q, got %s", personB, outPending)
+	}
+	if err := os.MkdirAll(pendingDir, 0o755); err != nil {
+		t.Fatalf("mkdir pendingDir: %v", err)
+	}
+	for _, f := range guard.Files {
+		if err := os.WriteFile(filepath.Join(pendingDir, filepath.Base(f)), []byte("marker"), 0o644); err != nil {
+			t.Fatalf("write marker %s: %v", f, err)
+		}
+	}
+	// Clear retry backoff for immediate load after weights appear.
+	eng.model.mu.Lock()
+	eng.model.lastErr = nil
+	eng.model.retryAt = time.Time{}
+	eng.model.mu.Unlock()
+
+	outReady, err := eng.MaskJSON(route, reqB)
+	if err != nil {
+		t.Fatalf("ready MaskJSON: %v", err)
+	}
+	if strings.Contains(string(outReady), personB) || !strings.Contains(string(outReady), "{{PERSON_") {
+		t.Fatalf("expected ready ModelGeneration to mask %q afresh, got %s", personB, outReady)
+	}
+
+	// 3. Remote HTTP generation reflects endpoint, format, and language.
+	genHTTP1 := eng.model.Generation(config.ModelConfig{
+		Enabled:  true,
+		Provider: config.ModelProviderHTTP,
+		Endpoint: "http://127.0.0.1:8080/ner",
+		Format:   config.ModelFormatGeneric,
+		Language: "en",
+	})
+	genHTTP2 := eng.model.Generation(config.ModelConfig{
+		Enabled:  true,
+		Provider: config.ModelProviderHTTP,
+		Endpoint: "http://127.0.0.1:8080/ner",
+		Format:   config.ModelFormatPresidio,
+		Language: "zh",
+	})
+	if genHTTP1 == "" || genHTTP2 == "" || genHTTP1 == genHTTP2 {
+		t.Fatalf("expected distinct HTTP ModelGeneration values, got %q vs %q", genHTTP1, genHTTP2)
+	}
+}
